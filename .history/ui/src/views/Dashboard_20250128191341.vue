@@ -154,6 +154,7 @@ export default {
       sessionStorage.removeItem('authToken'); 
       document.cookie = 'authToken=; Max-Age=-99999999'; 
 
+      // Redirect to login page
       this.$router.push('/login');
     },
   },

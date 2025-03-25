@@ -150,10 +150,11 @@ export default {
   },
   methods: {
     logout() {
-      localStorage.removeItem('authToken');  
-      sessionStorage.removeItem('authToken'); 
-      document.cookie = 'authToken=; Max-Age=-99999999'; 
+      localStorage.removeItem('authToken');  // Example of removing token from local storage
+      sessionStorage.removeItem('authToken'); // Example for session storage
+      document.cookie = 'authToken=; Max-Age=-99999999'; // Example for clearing a cookie
 
+      // Redirect to login page
       this.$router.push('/login');
     },
   },
