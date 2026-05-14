@@ -1,0 +1,42 @@
+# Environment secrets — never commit these
+.env
+*.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+venv/
+env/
+.venv/
+
+# Django
+db.sqlite3
+*.log
+staticfiles/
+media/
+
+# Encryption key — treat as a secret
+encryption_key.key
+
+# Node / Vue
+ui/node_modules/
+ui/dist/
+ui/dist-ssr/
+ui/coverage/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.suo
+*.sw?

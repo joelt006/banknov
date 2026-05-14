@@ -56,7 +56,7 @@ class UserSerializer(serializers.ModelSerializer):
 class BankAccountSerializer(serializers.ModelSerializer):
     class Meta:
         model = BankAccount
-        fields = ['user', 'account_holder_name', 'date_of_birth', 'current_address', 'Permanent_Address', 'sex', 'annual_income', 'occupation', 'country', 'state', 'city', 'street', 'pincode', 'phone_number', 'email', 'aadhar_number', 'passport_number', 'voter_id_number', 'pan_card_number', 'photo']
+        fields = ['account_number', 'account_holder_name', 'date_of_birth', 'current_address', 'Permanent_Address', 'sex', 'annual_income', 'occupation', 'country', 'state', 'city', 'street', 'pincode', 'phone_number', 'email', 'aadhar_number', 'passport_number', 'voter_id_number', 'pan_card_number', 'photo']
         read_only_fields = ['account_number']
 
     def validate_date_of_birth(self, value):
@@ -76,8 +76,8 @@ class BankAccountminorSerializer(serializers.ModelSerializer):
     def validate_date_of_birth(self, value):
         today = date.today()
         age = today.year - value.year - ((today.month, today.day) < (value.month, value.day))
-        if age <18:
-            raise serializers.ValidationError("Not allowed to create an account as minor account. Please use major account.")
+        if age >= 18:
+            raise serializers.ValidationError("Minor account requires age under 18. Please use a standard account.")
         return value
 
 class BankAccountseniorSerializer(serializers.ModelSerializer):

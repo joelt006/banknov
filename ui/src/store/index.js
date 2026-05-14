@@ -1,11 +1,10 @@
 import { createStore } from 'vuex';
-import apiClient from '../services/apiClient'; 
-
+import apiClient from '../services/apiClient';
 
 export default createStore({
   state: {
     user: null,
-    token: null,
+    token: localStorage.getItem('token') || null,
   },
   mutations: {
     setUser(state, user) {
@@ -13,6 +12,11 @@ export default createStore({
     },
     setToken(state, token) {
       state.token = token;
+      if (token) {
+        localStorage.setItem('token', token);
+      } else {
+        localStorage.removeItem('token');
+      }
     },
   },
   actions: {
