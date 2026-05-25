@@ -35,6 +35,22 @@
           <option value="PENDING">Pending</option>
         </select>
       </div>
+      <div class="date-range">
+        <input v-model="fromDate" type="date" title="From date" />
+        <span class="date-sep">→</span>
+        <input v-model="toDate" type="date" title="To date" />
+        <button v-if="fromDate || toDate" class="clear-dates" @click="fromDate=''; toDate=''" title="Clear dates">✕</button>
+      </div>
+      <div class="export-btns">
+        <button class="btn-export csv" @click="exportCSV" :disabled="filtered.length === 0" title="Export CSV">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+          CSV
+        </button>
+        <button class="btn-export print" @click="printStatement" :disabled="filtered.length === 0" title="Print statement">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 6 2 18 2 18 9"/><path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"/><rect x="6" y="14" width="12" height="8"/></svg>
+          Print
+        </button>
+      </div>
     </div>
 
     <!-- Table -->
@@ -107,8 +123,10 @@ export default {
     return {
       transactions: [], loading: true,
       search: '', typeFilter: '', statusFilter: '',
+      fromDate: '', toDate: '',
       currentPage: 1, perPage: 10,
       accountNumber: '',
+      accountHolderName: '',
     };
   },
   computed: {
@@ -120,11 +138,16 @@ export default {
     },
     filtered() {
       const q = this.search.toLowerCase();
+      const from = this.fromDate ? new Date(this.fromDate) : null;
+      const to = this.toDate ? new Date(this.toDate + 'T23:59:59') : null;
       return this.enriched.filter(t => {
         const matchSearch = !q || t.sender?.toLowerCase().includes(q) || t.receiver?.toLowerCase().includes(q) || String(t.amount).includes(q);
         const matchType = !this.typeFilter || (this.typeFilter === 'sent' ? t._sent : !t._sent);
         const matchStatus = !this.statusFilter || t.status === this.statusFilter;
-        return matchSearch && matchType && matchStatus;
+        const txDate = new Date(t.date);
+        const matchFrom = !from || txDate >= from;
+        const matchTo = !to || txDate <= to;
+        return matchSearch && matchType && matchStatus && matchFrom && matchTo;
       });
     },
     paginated() {
@@ -133,25 +156,32 @@ export default {
     },
     totalPages() { return Math.ceil(this.filtered.length / this.perPage); },
     totalDebited() {
-      return this.enriched.filter(t => t._sent).reduce((s, t) => s + parseFloat(t.amount || 0), 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+      return this.enriched.filter(t => t._sent).reduce((s, t) => s + parseFloat(t.amount || 0), 0)
+        .toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
     },
     totalCredited() {
-      return this.enriched.filter(t => !t._sent).reduce((s, t) => s + parseFloat(t.amount || 0), 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+      return this.enriched.filter(t => !t._sent).reduce((s, t) => s + parseFloat(t.amount || 0), 0)
+        .toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
     },
   },
   watch: {
     search() { this.currentPage = 1; },
     typeFilter() { this.currentPage = 1; },
     statusFilter() { this.currentPage = 1; },
+    fromDate() { this.currentPage = 1; },
+    toDate() { this.currentPage = 1; },
   },
   async created() {
     try {
-      const [txnRes, profileRes] = await Promise.all([
+      const [txnRes, balRes] = await Promise.all([
         apiClient.get('/transactions/statement/'),
-        apiClient.get('/accounts/profile/').catch(() => null),
+        apiClient.get('/accounts/balance/').catch(() => null),
       ]);
       this.transactions = txnRes.data;
-      if (profileRes) this.accountNumber = profileRes.data.account_number || '';
+      if (balRes) {
+        this.accountNumber = balRes.data.account_number || '';
+        this.accountHolderName = balRes.data.account_holder_name || '';
+      }
     } catch { this.transactions = []; }
     finally { this.loading = false; }
   },
@@ -159,6 +189,71 @@ export default {
     formatDate(d) { return new Date(d).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' }); },
     formatTime(d) { return new Date(d).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' }); },
     formatAmount(v) { return parseFloat(v || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); },
+
+    exportCSV() {
+      const headers = ['#', 'Date', 'Time', 'Type', 'Account', 'Amount (INR)', 'Status'];
+      const rows = this.filtered.map((t, i) => [
+        i + 1,
+        this.formatDate(t.date),
+        this.formatTime(t.date),
+        t._sent ? 'Sent' : 'Received',
+        t._sent ? (t.receiver || '') : (t.sender || ''),
+        (t._sent ? '-' : '+') + parseFloat(t.amount).toFixed(2),
+        t.status,
+      ]);
+      const csv = [headers, ...rows]
+        .map(r => r.map(c => `"${String(c).replace(/"/g, '""')}"`).join(','))
+        .join('\n');
+      const blob = new Blob(['﻿' + csv], { type: 'text/csv;charset=utf-8;' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `statement_${new Date().toISOString().slice(0, 10)}.csv`;
+      a.click();
+      URL.revokeObjectURL(url);
+    },
+
+    printStatement() {
+      const dateRange = (this.fromDate || this.toDate)
+        ? `${this.fromDate || 'Start'} to ${this.toDate || 'Today'}`
+        : 'All dates';
+      const rows = this.filtered.map((t, i) => `
+        <tr>
+          <td>${i + 1}</td>
+          <td>${this.formatDate(t.date)}<br><small>${this.formatTime(t.date)}</small></td>
+          <td>${t._sent ? 'Sent' : 'Received'}</td>
+          <td style="font-family:monospace;font-size:11px">${t._sent ? (t.receiver || '—') : (t.sender || '—')}</td>
+          <td style="color:${t._sent ? '#ef4444' : '#16a34a'};font-weight:700">${t._sent ? '−' : '+'} ₹${this.formatAmount(t.amount)}</td>
+          <td>${t.status}</td>
+        </tr>`).join('');
+      const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Account Statement</title>
+        <style>
+          body{font-family:sans-serif;padding:28px;color:#1e293b}
+          h1{font-size:22px;margin:0 0 4px}
+          .meta{font-size:13px;color:#64748b;margin-bottom:20px}
+          table{width:100%;border-collapse:collapse;font-size:13px}
+          th{background:#f1f5f9;padding:10px 12px;text-align:left;font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:#64748b}
+          td{padding:10px 12px;border-bottom:1px solid #f1f5f9}
+          tr:last-child td{border-bottom:none}
+          small{color:#94a3b8;font-size:11px}
+        </style></head><body>
+        <h1>MyBank — Account Statement</h1>
+        <div class="meta">
+          Account: <strong>${this.accountNumber}</strong> &nbsp;|&nbsp;
+          Holder: <strong>${this.accountHolderName}</strong> &nbsp;|&nbsp;
+          Period: <strong>${dateRange}</strong> &nbsp;|&nbsp;
+          Generated: <strong>${new Date().toLocaleString('en-IN')}</strong>
+        </div>
+        <table>
+          <thead><tr><th>#</th><th>Date</th><th>Type</th><th>Account</th><th>Amount</th><th>Status</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+        <script>window.onload=()=>{window.print()}<\/script>
+        </body></html>`;
+      const win = window.open('', '_blank');
+      win.document.write(html);
+      win.document.close();
+    },
   },
 };
 </script>
@@ -182,7 +277,7 @@ export default {
 .search-wrap {
   flex: 1; display: flex; align-items: center; gap: 10px;
   border: 1.5px solid #e2e8f0; border-radius: 8px;
-  padding: 8px 14px; background: #f8fafc; min-width: 200px;
+  padding: 8px 14px; background: #f8fafc; min-width: 180px;
 }
 .search-wrap svg { width: 16px; height: 16px; color: #94a3b8; flex-shrink: 0; }
 .search-wrap input { border: none; background: transparent; outline: none; font-size: 14px; color: #1e293b; width: 100%; }
@@ -195,6 +290,32 @@ export default {
   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' fill='none' stroke='%2394a3b8' stroke-width='2' viewBox='0 0 24 24'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E");
   background-repeat: no-repeat; background-position: right 8px center; background-size: 16px;
 }
+
+.date-range { display: flex; align-items: center; gap: 6px; }
+.date-range input[type="date"] {
+  padding: 8px 10px; border: 1.5px solid #e2e8f0; border-radius: 8px;
+  font-size: 13px; color: #475569; background: #f8fafc; outline: none; cursor: pointer;
+}
+.date-range input[type="date"]:focus { border-color: #2563eb; }
+.date-sep { font-size: 12px; color: #94a3b8; }
+.clear-dates {
+  width: 26px; height: 26px; border-radius: 50%; border: 1.5px solid #fecaca;
+  background: #fef2f2; color: #dc2626; font-size: 11px; cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+}
+
+.export-btns { display: flex; gap: 8px; }
+.btn-export {
+  display: flex; align-items: center; gap: 6px;
+  padding: 8px 14px; border-radius: 8px; font-size: 13px; font-weight: 600;
+  cursor: pointer; border: 1.5px solid; transition: background .15s;
+}
+.btn-export svg { width: 15px; height: 15px; }
+.btn-export.csv { background: #f0fdf4; color: #16a34a; border-color: #bbf7d0; }
+.btn-export.csv:hover:not(:disabled) { background: #dcfce7; }
+.btn-export.print { background: #eff6ff; color: #2563eb; border-color: #bfdbfe; }
+.btn-export.print:hover:not(:disabled) { background: #dbeafe; }
+.btn-export:disabled { opacity: .4; cursor: not-allowed; }
 
 .table-card {
   background: #fff; border-radius: 16px;
@@ -255,7 +376,8 @@ export default {
 
 @media (max-width: 640px) {
   .summary-row { grid-template-columns: 1fr; }
-  .filter-bar { flex-direction: column; }
+  .filter-bar { flex-direction: column; align-items: stretch; }
   .txn-table { display: block; overflow-x: auto; }
+  .date-range { flex-wrap: wrap; }
 }
 </style>

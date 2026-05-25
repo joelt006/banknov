@@ -1,12 +1,10 @@
-from decimal import Decimal, InvalidOperation
-from .serializers import BankAccountSerializer, BankAccountminorSerializer, BankAccountseniorSerializer, UserSerializer
-from django.contrib.auth import authenticate,  login as django_login
-from django.views.decorators.csrf import csrf_exempt,ensure_csrf_cookie
+from .serializers import BankAccountSerializer, BankAccountminorSerializer, BankAccountseniorSerializer
+from django.contrib.auth import authenticate, login as django_login
+from django.views.decorators.csrf import csrf_exempt
+from decimal import Decimal
 from rest_framework.decorators import api_view, permission_classes, authentication_classes
-from django.shortcuts import get_object_or_404, render, redirect
 from rest_framework.permissions import IsAuthenticated,AllowAny
 from django.utils.decorators import method_decorator
-from rest_framework.authtoken.models import Token
 from email.mime.multipart import MIMEMultipart
 from rest_framework.response import Response
 from django.middleware.csrf import get_token
@@ -18,37 +16,31 @@ from django.core.cache import cache
 from .forms import EditProfileForm
 from rest_framework import status
 from django.conf import settings
-from .models import BankAccount, CardRequest
+from .models import BankAccount, CardRequest, LoginHistory, UserSession
+from .utils import rate_limit
+from django.contrib.auth.hashers import make_password, check_password as check_pw
 from PIL import Image
 import pytesseract
 import logging
 import smtplib
 import random
+import uuid
 import json
-from django.contrib.auth.decorators import login_required
-from rest_framework.permissions import AllowAny
-from rest_framework.response import Response
-from rest_framework import status
-from decimal import Decimal, InvalidOperation
-from django.shortcuts import get_object_or_404
-from .models import BankAccount
 from rest_framework_simplejwt.tokens import AccessToken
-from django.http import JsonResponse
-import json
-from rest_framework.permissions import AllowAny
-from rest_framework.response import Response
-from decimal import Decimal, InvalidOperation
-import logging
-from django.http import JsonResponse
-from django.middleware.csrf import get_token
-import logging
-from decimal import Decimal, InvalidOperation
-from rest_framework.response import Response
-from transaction.models import  Transaction
 
 
 
 logger = logging.getLogger(__name__)
+
+
+def _rate_limit(key, max_attempts=5, window_seconds=900):
+    attempts = cache.get(key, 0)
+    if attempts >= max_attempts:
+        return False
+    cache.set(key, attempts + 1, timeout=window_seconds)
+    return True
+
+
 def generate_otp():
     return random.randint(100000, 999999)
 def send_otp_email(user_email, otp):
@@ -130,11 +122,14 @@ def verify_otp(request):
     otp = request.data.get('otp')
     if not email or not otp:
         return JsonResponse({'error': 'Email and OTP are required.'}, status=400)
+    if not _rate_limit(f'otp_attempts_{email}', max_attempts=5, window_seconds=600):
+        return JsonResponse({'error': 'Too many attempts. Try again later.'}, status=429)
     cached_otp = cache.get(f'otp_{email}')
     if cached_otp and str(cached_otp) == str(otp):
+        cache.delete(f'otp_{email}')
         return JsonResponse({'message': 'OTP verified successfully!'})
     else:
-        return JsonResponse({'error': 'Invalid OTP or OTP has expired.'}, status=400) 
+        return JsonResponse({'error': 'Invalid OTP or OTP has expired.'}, status=400)
 
 
 
@@ -199,25 +194,45 @@ def login_view(request):
     if request.method == 'POST':
         try:
             data = json.loads(request.body)
-            username = data.get('username')
-            password = data.get('password')
+            username = data.get('username', '')
+            password = data.get('password', '')
+            captcha_id = data.get('captcha_id', '')
+            captcha_answer = data.get('captcha_answer', '')
+            ip = request.META.get('REMOTE_ADDR', 'unknown')
+
+            if not _rate_limit(f'login_{ip}', max_attempts=5, window_seconds=900):
+                return JsonResponse({'error': 'Too many login attempts. Try again later.'}, status=429)
+
+            expected = cache.get(f'captcha_{captcha_id}')
+            if not captcha_id or expected is None or not captcha_answer:
+                return JsonResponse({'error': 'CAPTCHA is required.'}, status=400)
+            try:
+                if int(captcha_answer) != expected:
+                    cache.delete(f'captcha_{captcha_id}')
+                    return JsonResponse({'error': 'Incorrect CAPTCHA answer.'}, status=400)
+            except (ValueError, TypeError):
+                return JsonResponse({'error': 'Invalid CAPTCHA answer.'}, status=400)
+            cache.delete(f'captcha_{captcha_id}')
 
             user = authenticate(request, username=username, password=password)
             if user:
-                django_login(request, user)
-                token = AccessToken.for_user(user)
-                return JsonResponse({"message": "Login successful!", "token": str(token)})
+                otp = generate_otp()
+                temp_token = str(uuid.uuid4())
+                cache.set(f'login_otp_{temp_token}', {'user_id': user.id, 'otp': otp}, timeout=300)
+                send_otp_email(user.email, otp)
+                return JsonResponse({'requires_otp': True, 'temp_token': temp_token})
             else:
-                return JsonResponse({'error': 'Invalid credentials'}, status=401)
-        except Exception as e:
-            return JsonResponse({'error': f"An error occurred: {str(e)}"}, status=500)
+                LoginHistory.objects.create(
+                    user=User.objects.filter(username=username).first(),
+                    ip_address=ip,
+                    user_agent=request.META.get('HTTP_USER_AGENT', ''),
+                    success=False,
+                    failure_reason='Invalid credentials',
+                )
+                return JsonResponse({'error': 'Invalid credentials.'}, status=401)
+        except Exception:
+            return JsonResponse({'error': 'Login failed. Please try again.'}, status=500)
 
-
-from rest_framework.decorators import api_view
-from rest_framework.response import Response
-import logging
-
-logger = logging.getLogger(__name__)
 
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
@@ -238,43 +253,210 @@ def get_csrf_token(request):
     return JsonResponse({'csrfToken': csrf_token})
 
 
-logger = logging.getLogger(__name__)
+# ── CAPTCHA ───────────────────────────────────────────────────────────────────
+@api_view(['GET'])
+@permission_classes([AllowAny])
+def get_captcha(request):
+    a = random.randint(1, 15)
+    b = random.randint(1, 15)
+    captcha_id = str(uuid.uuid4())
+    cache.set(f'captcha_{captcha_id}', a + b, timeout=300)
+    return JsonResponse({'captcha_id': captcha_id, 'question': f'{a} + {b} = ?'})
+
+
+# ── Login OTP verify ──────────────────────────────────────────────────────────
+@csrf_exempt
+@api_view(['POST'])
+@authentication_classes([])
+@permission_classes([AllowAny])
+def login_otp_verify(request):
+    temp_token = request.data.get('temp_token', '')
+    otp = request.data.get('otp', '')
+    if not temp_token or not otp:
+        return JsonResponse({'error': 'Token and OTP are required.'}, status=400)
+    if not _rate_limit(f'login_otp_verify_{temp_token}', max_attempts=5, window_seconds=300):
+        return JsonResponse({'error': 'Too many attempts. Please login again.'}, status=429)
+    data = cache.get(f'login_otp_{temp_token}')
+    if not data:
+        return JsonResponse({'error': 'Session expired. Please login again.'}, status=400)
+    if str(data['otp']) != str(otp):
+        return JsonResponse({'error': 'Invalid OTP.'}, status=400)
+    cache.delete(f'login_otp_{temp_token}')
+    try:
+        user = User.objects.get(id=data['user_id'])
+    except User.DoesNotExist:
+        return JsonResponse({'error': 'User not found.'}, status=400)
+    ip = request.META.get('REMOTE_ADDR', 'unknown')
+    ua = request.META.get('HTTP_USER_AGENT', '')
+    session = UserSession.objects.create(
+        user=user, ip_address=ip, user_agent=ua,
+    )
+    token = AccessToken.for_user(user)
+    token['session_key'] = str(session.session_key)
+    django_login(request, user)
+    LoginHistory.objects.create(user=user, ip_address=ip, user_agent=ua, success=True)
+    return JsonResponse({'message': 'Login successful!', 'token': str(token), 'username': user.username})
+
+
+# ── Logout ────────────────────────────────────────────────────────────────────
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def logout_view(request):
+    session_key = request.auth.get('session_key') if request.auth else None
+    if session_key:
+        UserSession.objects.filter(session_key=session_key).update(is_active=False)
+    return Response({'message': 'Logged out successfully.'})
+
+
+# ── Forgot password ───────────────────────────────────────────────────────────
+@csrf_exempt
+@api_view(['POST'])
+@authentication_classes([])
+@permission_classes([AllowAny])
+def forgot_password(request):
+    email = request.data.get('email', '').strip()
+    if not email:
+        return Response({'error': 'Email is required.'}, status=400)
+    if not _rate_limit(f'forgot_pw_{email}', max_attempts=3, window_seconds=900):
+        return Response({'error': 'Too many requests. Try again later.'}, status=429)
+    user = User.objects.filter(email=email).first()
+    if user:
+        otp = generate_otp()
+        cache.set(f'reset_otp_{email}', otp, timeout=600)
+        send_otp_email(email, otp)
+    return Response({'message': 'If an account with that email exists, an OTP has been sent.'})
+
 
 @csrf_exempt
 @api_view(['POST'])
+@authentication_classes([])
 @permission_classes([AllowAny])
-def send_money_view(request):
-    sender_account_number = request.data.get('sender_account_number')
-    recipient_account_number = request.data.get('recipient_account_number')
-    amount = request.data.get('amount')
-    
-    if not sender_account_number or not recipient_account_number or not amount:
-        return Response({'error': 'Sender account number, recipient account number, and amount are required.'}, status=status.HTTP_400_BAD_REQUEST)
-    
+def reset_password(request):
+    email = request.data.get('email', '').strip()
+    otp = request.data.get('otp', '').strip()
+    new_password = request.data.get('new_password', '')
+    if not email or not otp or not new_password:
+        return Response({'error': 'Email, OTP, and new password are required.'}, status=400)
+    if not _rate_limit(f'reset_otp_attempts_{email}', max_attempts=5, window_seconds=600):
+        return Response({'error': 'Too many attempts. Try again later.'}, status=429)
+    cached_otp = cache.get(f'reset_otp_{email}')
+    if not cached_otp or str(cached_otp) != str(otp):
+        return Response({'error': 'Invalid or expired OTP.'}, status=400)
+    user = User.objects.filter(email=email).first()
+    if not user:
+        return Response({'error': 'User not found.'}, status=404)
+    if len(new_password) < 8:
+        return Response({'error': 'Password must be at least 8 characters.'}, status=400)
+    user.set_password(new_password)
+    user.save()
+    cache.delete(f'reset_otp_{email}')
+    UserSession.objects.filter(user=user, is_active=True).update(is_active=False)
+    return Response({'message': 'Password reset successful. Please login again.'})
+
+
+# ── Change password (authenticated) ──────────────────────────────────────────
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def change_password(request):
+    current_password = request.data.get('current_password', '')
+    new_password = request.data.get('new_password', '')
+    if not current_password or not new_password:
+        return Response({'error': 'Current and new password are required.'}, status=400)
+    user = request.user
+    if not user.check_password(current_password):
+        return Response({'error': 'Current password is incorrect.'}, status=400)
+    if len(new_password) < 8:
+        return Response({'error': 'New password must be at least 8 characters.'}, status=400)
+    if current_password == new_password:
+        return Response({'error': 'New password must be different.'}, status=400)
+    user.set_password(new_password)
+    user.save()
+    session_key = request.auth.get('session_key') if request.auth else None
+    qs = UserSession.objects.filter(user=user, is_active=True)
+    if session_key:
+        qs = qs.exclude(session_key=session_key)
+    qs.update(is_active=False)
+    return Response({'message': 'Password changed. Other sessions have been logged out.'})
+
+
+# ── Transaction PIN ───────────────────────────────────────────────────────────
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def pin_status(request):
     try:
-        amount = Decimal(amount)
-    except (ValueError, InvalidOperation):
-        return Response({'error': 'Invalid amount.'}, status=status.HTTP_400_BAD_REQUEST)
-    
+        account = BankAccount.objects.get(user=request.user)
+        return Response({'has_pin': bool(account.transaction_pin)})
+    except BankAccount.DoesNotExist:
+        return Response({'error': 'No bank account linked.'}, status=404)
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def set_transaction_pin(request):
+    new_pin = request.data.get('new_pin', '')
+    current_pin = request.data.get('current_pin', '')
+    if not new_pin or not new_pin.isdigit() or len(new_pin) != 4:
+        return Response({'error': 'PIN must be exactly 4 digits.'}, status=400)
     try:
-        sender = get_object_or_404(BankAccount, account_number=sender_account_number)
-        recipient = get_object_or_404(BankAccount, account_number=recipient_account_number)
-        
-        if sender.balance < amount:
-            return Response({'error': 'Insufficient funds.'}, status=status.HTTP_400_BAD_REQUEST)
-        
-        sender.balance -= amount
-        recipient.balance += amount
-        sender.save()
-        recipient.save()
-        
-        transaction = Transaction(sender=sender, receiver=recipient, amount=amount, status='Completed')
-        transaction.save()
-        
-        return Response({'message': 'Transaction successful.'}, status=status.HTTP_200_OK)
-    except Exception as e:
-        logger.error(f"Error during transaction: {e}")
-        return Response({'error': 'Internal server error.'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)@api_view(['POST'])
+        account = BankAccount.objects.get(user=request.user)
+    except BankAccount.DoesNotExist:
+        return Response({'error': 'No bank account linked.'}, status=404)
+    if account.transaction_pin:
+        if not current_pin:
+            return Response({'error': 'Current PIN is required to change PIN.'}, status=400)
+        if not check_pw(current_pin, account.transaction_pin):
+            return Response({'error': 'Current PIN is incorrect.'}, status=400)
+    account.transaction_pin = make_password(new_pin)
+    account.save()
+    return Response({'message': 'Transaction PIN set successfully.'})
+
+
+# ── Session management ────────────────────────────────────────────────────────
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def list_sessions(request):
+    current_key = request.auth.get('session_key') if request.auth else None
+    sessions = UserSession.objects.filter(user=request.user, is_active=True)
+    return Response([{
+        'id': s.id,
+        'session_key': s.session_key,
+        'ip_address': s.ip_address,
+        'user_agent': s.user_agent,
+        'created_at': s.created_at.isoformat(),
+        'last_seen': s.last_seen.isoformat(),
+        'is_current': s.session_key == current_key,
+    } for s in sessions])
+
+
+@api_view(['DELETE'])
+@permission_classes([IsAuthenticated])
+def revoke_session(request, session_key):
+    session = UserSession.objects.filter(
+        user=request.user, session_key=session_key, is_active=True
+    ).first()
+    if not session:
+        return Response({'error': 'Session not found.'}, status=404)
+    session.is_active = False
+    session.save()
+    return Response({'message': 'Session revoked.'})
+
+
+# ── Login history ─────────────────────────────────────────────────────────────
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def login_history_view(request):
+    history = LoginHistory.objects.filter(user=request.user)[:20]
+    return Response([{
+        'ip_address': h.ip_address,
+        'user_agent': h.user_agent,
+        'timestamp': h.timestamp.isoformat(),
+        'success': h.success,
+        'failure_reason': h.failure_reason,
+    } for h in history])
+
+
+logger = logging.getLogger(__name__)
+
 
 from rest_framework.views import APIView
 from rest_framework.permissions import AllowAny
@@ -323,9 +505,9 @@ def profile_view(request):
         'pincode': bank_account.pincode,
         'phone_number': bank_account.phone_number,
         'email': bank_account.email,
-        'aadhar_number': bank_account.aadhar_number,
-        'passport_number': bank_account.passport_number,
-        'voter_id_number': bank_account.voter_id_number,
+        'aadhar_number': f'XXXX XXXX {bank_account.aadhar_number[-4:]}' if bank_account.aadhar_number else None,
+        'passport_number': f'XXXXX{bank_account.passport_number[-4:]}' if bank_account.passport_number else None,
+        'voter_id_number': f'XXXXXXX{bank_account.voter_id_number[-3:]}' if bank_account.voter_id_number else None,
         'pan_card_number': bank_account.pan_card_number,
         'photo': bank_account.photo.url if bank_account.photo else None,
         'created_at': str(bank_account.created_at) if bank_account.created_at else None,
@@ -451,6 +633,11 @@ def balance_view(request):
             'balance': str(bank_account.balance),
             'account_number': bank_account.account_number,
             'account_holder_name': bank_account.account_holder_name,
+            'is_frozen': bank_account.is_frozen,
+            'created_at': bank_account.created_at.isoformat(),
+            'ifsc_code': 'MYBK0001234',
+            'account_type': 'Savings Account',
+            'branch': 'MyBank Main Branch, New Delhi',
         }, status=status.HTTP_200_OK)
     except BankAccount.DoesNotExist:
         return Response({'error': 'No bank account linked to this user.'}, status=status.HTTP_404_NOT_FOUND)
@@ -470,11 +657,42 @@ def admin_login(request):
     password = request.data.get('password', '')
     if not username or not password:
         return Response({'error': 'Username and password are required.'}, status=status.HTTP_400_BAD_REQUEST)
+    ip = request.META.get('REMOTE_ADDR', 'unknown')
+    if not _rate_limit(f'admin_login_{ip}', max_attempts=5, window_seconds=900):
+        return Response({'error': 'Too many login attempts. Try again later.'}, status=status.HTTP_429_TOO_MANY_REQUESTS)
     user = authenticate(request, username=username, password=password)
     if user is None:
         return Response({'error': 'Invalid credentials.'}, status=status.HTTP_401_UNAUTHORIZED)
     if not (user.is_staff or user.is_superuser):
         return Response({'error': 'Access denied. Staff account required.'}, status=status.HTTP_403_FORBIDDEN)
+    otp = generate_otp()
+    temp_token = str(uuid.uuid4())
+    cache.set(f'admin_login_otp_{temp_token}', {'user_id': user.id, 'otp': otp}, timeout=300)
+    send_otp_email(user.email, otp)
+    return Response({'requires_otp': True, 'temp_token': temp_token}, status=status.HTTP_200_OK)
+
+
+@csrf_exempt
+@api_view(['POST'])
+@authentication_classes([])
+@permission_classes([AllowAny])
+def admin_login_otp_verify(request):
+    temp_token = request.data.get('temp_token', '')
+    otp = request.data.get('otp', '')
+    if not temp_token or not otp:
+        return Response({'error': 'Token and OTP are required.'}, status=400)
+    if not _rate_limit(f'admin_otp_verify_{temp_token}', max_attempts=5, window_seconds=300):
+        return Response({'error': 'Too many attempts. Please login again.'}, status=429)
+    data = cache.get(f'admin_login_otp_{temp_token}')
+    if not data:
+        return Response({'error': 'Session expired. Please login again.'}, status=400)
+    if str(data['otp']) != str(otp):
+        return Response({'error': 'Invalid OTP.'}, status=400)
+    cache.delete(f'admin_login_otp_{temp_token}')
+    try:
+        user = User.objects.get(id=data['user_id'])
+    except User.DoesNotExist:
+        return Response({'error': 'User not found.'}, status=400)
     token = AccessToken.for_user(user)
     return Response({'token': str(token), 'username': user.username}, status=status.HTTP_200_OK)
 
@@ -581,12 +799,6 @@ def admin_update_account(request, pk):
     if 'is_frozen' in request.data:
         account.is_frozen = bool(request.data['is_frozen'])
 
-    if 'balance' in request.data:
-        try:
-            account.balance = Decimal(str(request.data['balance']))
-        except (ValueError, InvalidOperation):
-            return Response({'error': 'Invalid balance value.'}, status=status.HTTP_400_BAD_REQUEST)
-
     account.save()
     return Response({
         'message': 'Account updated successfully.',
@@ -612,6 +824,36 @@ def admin_list_transactions(request):
     } for t in txns])
 
 
+# ── CVV encryption helpers ───────────────────────────────────────────────────
+def _encrypt_cvv(cvv_plain):
+    from django.core import signing
+    return signing.dumps(cvv_plain, salt='card-cvv')
+
+
+def _decrypt_cvv(encrypted_cvv):
+    from django.core import signing
+    try:
+        return signing.loads(encrypted_cvv, salt='card-cvv')
+    except Exception:
+        return encrypted_cvv if len(encrypted_cvv) <= 3 else None
+
+
+# ── Card number generator (Luhn-valid 16-digit number) ───────────────────────
+def _generate_card_number(card_type):
+    prefixes = {'classic': '4111', 'gold': '5200', 'platinum': '3782'}
+    prefix = prefixes.get(card_type, '4111')
+    while True:
+        partial = prefix + ''.join([str(random.randint(0, 9)) for _ in range(11)])
+        total = sum(
+            (n * 2 - 9 if n * 2 > 9 else n * 2) if i % 2 == 0 else n
+            for i, n in enumerate(int(d) for d in reversed(partial))
+        )
+        check = (10 - (total % 10)) % 10
+        number = partial + str(check)
+        if not CardRequest.objects.filter(card_number=number).exists():
+            return number
+
+
 # ── Card Requests (Customer) ──────────────────────────────────────────────────
 @api_view(['GET', 'POST'])
 @permission_classes([IsAuthenticated])
@@ -630,6 +872,9 @@ def card_requests(request):
             'requested_at': r.requested_at.isoformat(),
             'reviewed_at': r.reviewed_at.isoformat() if r.reviewed_at else None,
             'admin_note': r.admin_note,
+            'card_number': r.card_number if r.status == 'approved' else None,
+            'expiry_date': r.expiry_date.strftime('%m/%y') if r.expiry_date else None,
+            'cvv': _decrypt_cvv(r.cvv) if r.status == 'approved' and r.cvv else None,
         } for r in reqs])
 
     card_type = request.data.get('card_type', '').lower()
@@ -645,6 +890,9 @@ def card_requests(request):
         return Response({'error': msg}, status=400)
 
     req = CardRequest.objects.create(bank_account=account, card_type=card_type)
+    _notify(request.user, 'Card Request Submitted',
+            f'Your {card_type.capitalize()} card request has been submitted and is under review.',
+            'card', '/MyCards')
     return Response({
         'id': req.id,
         'card_type': req.card_type,
@@ -696,7 +944,25 @@ def admin_review_card_request(request, pk):
     req.reviewed_at = timezone.now()
     req.reviewed_by = request.user
     req.admin_note = request.data.get('admin_note', '')
+
+    if req.status == 'approved':
+        from datetime import date
+        req.card_number = _generate_card_number(req.card_type)
+        req.expiry_date = date(timezone.now().year + 4, timezone.now().month, 1)
+        req.cvv = _encrypt_cvv(str(random.randint(100, 999)))
+
     req.save()
+
+    if req.bank_account.user:
+        if req.status == 'approved':
+            _notify(req.bank_account.user, 'Card Request Approved',
+                    f'Your {req.card_type.capitalize()} card has been approved! Card ending in {req.card_number[-4:]} is ready.',
+                    'card', '/MyCards')
+        else:
+            note_suffix = f' Reason: {req.admin_note}' if req.admin_note else ''
+            _notify(req.bank_account.user, 'Card Request Rejected',
+                    f'Your {req.card_type.capitalize()} card request was not approved.{note_suffix}',
+                    'card', '/MyCards')
 
     return Response({
         'id': req.id,
@@ -704,4 +970,585 @@ def admin_review_card_request(request, pk):
         'reviewed_at': req.reviewed_at.isoformat(),
         'reviewed_by': req.reviewed_by.username,
         'admin_note': req.admin_note,
+        'card_number': req.card_number,
+        'expiry_date': req.expiry_date.strftime('%m/%y') if req.expiry_date else None,
     })
+
+
+# ── Card Controls (Customer) ──────────────────────────────────────────────────
+@api_view(['GET', 'PATCH'])
+@permission_classes([IsAuthenticated])
+def card_settings_view(request, pk):
+    try:
+        account = BankAccount.objects.get(user=request.user)
+        req = CardRequest.objects.get(pk=pk, bank_account=account, status='approved')
+    except (BankAccount.DoesNotExist, CardRequest.DoesNotExist):
+        return Response({'error': 'Card not found.'}, status=404)
+
+    if request.method == 'GET':
+        return Response({
+            'id': req.id,
+            'is_blocked': req.is_blocked,
+            'allow_international': req.allow_international,
+            'allow_online': req.allow_online,
+            'allow_contactless': req.allow_contactless,
+        })
+
+    allowed_fields = {'is_blocked', 'allow_international', 'allow_online', 'allow_contactless'}
+    for field in allowed_fields:
+        if field in request.data:
+            setattr(req, field, bool(request.data[field]))
+    req.save()
+    return Response({
+        'id': req.id,
+        'is_blocked': req.is_blocked,
+        'allow_international': req.allow_international,
+        'allow_online': req.allow_online,
+        'allow_contactless': req.allow_contactless,
+    })
+
+
+# ── Loan interest rates ───────────────────────────────────────────────────────
+_LOAN_RATES = {
+    'personal': 12.0,
+    'home': 8.5,
+    'car': 9.0,
+    'education': 8.0,
+}
+
+def _calc_emi(principal, annual_rate, months):
+    r = float(annual_rate) / 100 / 12
+    n = months
+    if r == 0:
+        return round(float(principal) / n, 2)
+    emi = float(principal) * r * (1 + r)**n / ((1 + r)**n - 1)
+    return round(emi, 2)
+
+
+# ── Loans (Customer) ──────────────────────────────────────────────────────────
+@api_view(['GET', 'POST'])
+@permission_classes([IsAuthenticated])
+def loans_view(request):
+    from .models import LoanApplication
+    try:
+        account = BankAccount.objects.get(user=request.user)
+    except BankAccount.DoesNotExist:
+        return Response({'error': 'No bank account linked.'}, status=404)
+
+    if request.method == 'GET':
+        loans = LoanApplication.objects.filter(bank_account=account)
+        return Response([{
+            'id': l.id,
+            'loan_type': l.loan_type,
+            'amount': str(l.amount),
+            'tenure_months': l.tenure_months,
+            'interest_rate': str(l.interest_rate),
+            'purpose': l.purpose,
+            'status': l.status,
+            'monthly_emi': str(l.monthly_emi) if l.monthly_emi else None,
+            'approved_amount': str(l.approved_amount) if l.approved_amount else None,
+            'admin_note': l.admin_note,
+            'applied_at': l.applied_at.isoformat(),
+            'reviewed_at': l.reviewed_at.isoformat() if l.reviewed_at else None,
+        } for l in loans])
+
+    loan_type = request.data.get('loan_type', '').lower()
+    if loan_type not in _LOAN_RATES:
+        return Response({'error': 'Invalid loan type.'}, status=400)
+
+    try:
+        amount = Decimal(str(request.data.get('amount', 0)))
+        if amount < 1000:
+            return Response({'error': 'Minimum loan amount is ₹1,000.'}, status=400)
+    except Exception:
+        return Response({'error': 'Invalid amount.'}, status=400)
+
+    valid_tenures = [12, 24, 36, 60, 84, 120]
+    try:
+        tenure = int(request.data.get('tenure_months', 0))
+        if tenure not in valid_tenures:
+            return Response({'error': f'Tenure must be one of {valid_tenures} months.'}, status=400)
+    except Exception:
+        return Response({'error': 'Invalid tenure.'}, status=400)
+
+    from .models import LoanApplication
+    active = LoanApplication.objects.filter(bank_account=account, status__in=['pending', 'approved', 'active']).count()
+    if active >= 3:
+        return Response({'error': 'You already have 3 active/pending loan applications.'}, status=400)
+
+    rate = _LOAN_RATES[loan_type]
+    emi = _calc_emi(amount, rate, tenure)
+    loan = LoanApplication.objects.create(
+        bank_account=account,
+        loan_type=loan_type,
+        amount=amount,
+        tenure_months=tenure,
+        interest_rate=Decimal(str(rate)),
+        purpose=request.data.get('purpose', '').strip(),
+        monthly_emi=Decimal(str(emi)),
+    )
+    _notify(request.user, 'Loan Application Submitted',
+            f'Your ₹{float(amount):,.2f} {loan_type.capitalize()} Loan application is under review.',
+            'loan', '/Loans')
+    return Response({
+        'id': loan.id,
+        'loan_type': loan.loan_type,
+        'amount': str(loan.amount),
+        'tenure_months': loan.tenure_months,
+        'interest_rate': str(loan.interest_rate),
+        'monthly_emi': str(loan.monthly_emi),
+        'status': loan.status,
+        'applied_at': loan.applied_at.isoformat(),
+    }, status=201)
+
+
+# ── Loans (Admin) ─────────────────────────────────────────────────────────────
+@api_view(['GET'])
+@permission_classes([IsAdminUser])
+def admin_list_loans(request):
+    from .models import LoanApplication
+    status_filter = request.query_params.get('status', '')
+    qs = LoanApplication.objects.select_related('bank_account', 'reviewed_by').order_by('-applied_at')
+    if status_filter:
+        qs = qs.filter(status=status_filter)
+    return Response([{
+        'id': l.id,
+        'loan_type': l.loan_type,
+        'amount': str(l.amount),
+        'tenure_months': l.tenure_months,
+        'interest_rate': str(l.interest_rate),
+        'monthly_emi': str(l.monthly_emi) if l.monthly_emi else None,
+        'purpose': l.purpose,
+        'status': l.status,
+        'account_holder_name': l.bank_account.account_holder_name,
+        'account_number': l.bank_account.account_number,
+        'email': l.bank_account.email,
+        'approved_amount': str(l.approved_amount) if l.approved_amount else None,
+        'admin_note': l.admin_note,
+        'applied_at': l.applied_at.isoformat(),
+        'reviewed_at': l.reviewed_at.isoformat() if l.reviewed_at else None,
+        'reviewed_by': l.reviewed_by.username if l.reviewed_by else None,
+    } for l in qs])
+
+
+@api_view(['PATCH'])
+@permission_classes([IsAdminUser])
+def admin_review_loan(request, pk):
+    from .models import LoanApplication
+    from django.utils import timezone as tz
+    from django.db import transaction as db_tx
+    try:
+        loan = LoanApplication.objects.select_related('bank_account').get(pk=pk)
+    except LoanApplication.DoesNotExist:
+        return Response({'error': 'Loan not found.'}, status=404)
+
+    if loan.status not in ('pending',):
+        return Response({'error': 'Only pending loans can be reviewed.'}, status=400)
+
+    action = request.data.get('action', '')
+    if action not in ('approve', 'reject'):
+        return Response({'error': 'action must be approve or reject.'}, status=400)
+
+    loan.admin_note = request.data.get('admin_note', '')
+    loan.reviewed_at = tz.now()
+    loan.reviewed_by = request.user
+
+    if action == 'approve':
+        try:
+            approved_amt = Decimal(str(request.data.get('approved_amount', loan.amount)))
+        except Exception:
+            return Response({'error': 'Invalid approved_amount.'}, status=400)
+        emi = _calc_emi(approved_amt, float(loan.interest_rate), loan.tenure_months)
+        loan.approved_amount = approved_amt
+        loan.monthly_emi = Decimal(str(emi))
+        loan.status = 'active'
+        with db_tx.atomic():
+            loan.save()
+            account = BankAccount.objects.select_for_update().get(pk=loan.bank_account_id)
+            account.balance += approved_amt
+            account.save()
+            from transaction.models import Transaction
+            Transaction.objects.create(
+                sender=None,
+                receiver=account,
+                amount=approved_amt,
+                status='Completed',
+                TransactionType='LOAN_DISBURSAL',
+            )
+    else:
+        loan.status = 'rejected'
+        loan.save()
+
+    if loan.bank_account.user:
+        if action == 'approve':
+            _notify(loan.bank_account.user, 'Loan Approved & Disbursed',
+                    f'Your {loan.loan_type.capitalize()} Loan of ₹{float(approved_amt):,.2f} has been approved and credited to your account!',
+                    'loan', '/Loans')
+        else:
+            note_suffix = f' Reason: {loan.admin_note}' if loan.admin_note else ''
+            _notify(loan.bank_account.user, 'Loan Application Rejected',
+                    f'Your {loan.loan_type.capitalize()} Loan application was not approved.{note_suffix}',
+                    'loan', '/Loans')
+
+    return Response({'id': loan.id, 'status': loan.status, 'approved_amount': str(loan.approved_amount) if loan.approved_amount else None})
+
+
+# ── Fixed Deposits ────────────────────────────────────────────────────────────
+_FD_RATES = {3: 4.5, 6: 5.5, 12: 6.5, 24: 7.0, 36: 7.25, 60: 7.5}
+
+def _calc_fd_maturity(principal, annual_rate, tenure_months):
+    years = tenure_months / 12
+    maturity = float(principal) * (1 + float(annual_rate) / 100) ** years
+    return round(maturity, 2)
+
+
+@api_view(['GET', 'POST'])
+@permission_classes([IsAuthenticated])
+def fixed_deposits_view(request):
+    from .models import FixedDeposit
+    from datetime import date
+    from dateutil.relativedelta import relativedelta
+    try:
+        account = BankAccount.objects.get(user=request.user)
+    except BankAccount.DoesNotExist:
+        return Response({'error': 'No bank account linked.'}, status=404)
+
+    if request.method == 'GET':
+        fds = FixedDeposit.objects.filter(bank_account=account)
+        return Response([{
+            'id': f.id,
+            'amount': str(f.amount),
+            'tenure_months': f.tenure_months,
+            'interest_rate': str(f.interest_rate),
+            'start_date': str(f.start_date),
+            'maturity_date': str(f.maturity_date),
+            'maturity_amount': str(f.maturity_amount),
+            'status': f.status,
+        } for f in fds])
+
+    try:
+        amount = Decimal(str(request.data.get('amount', 0)))
+        if amount < 1000:
+            return Response({'error': 'Minimum FD amount is ₹1,000.'}, status=400)
+    except Exception:
+        return Response({'error': 'Invalid amount.'}, status=400)
+
+    try:
+        tenure = int(request.data.get('tenure_months', 0))
+        if tenure not in _FD_RATES:
+            return Response({'error': f'Tenure must be one of {list(_FD_RATES.keys())} months.'}, status=400)
+    except Exception:
+        return Response({'error': 'Invalid tenure.'}, status=400)
+
+    if account.balance < amount:
+        return Response({'error': 'Insufficient balance to open this FD.'}, status=400)
+    if account.is_frozen:
+        return Response({'error': 'Your account is frozen.'}, status=403)
+
+    rate = _FD_RATES[tenure]
+    maturity_amount = _calc_fd_maturity(amount, rate, tenure)
+    today = date.today()
+    maturity_date = today + relativedelta(months=tenure)
+
+    from django.db import transaction as db_tx
+    with db_tx.atomic():
+        account_locked = BankAccount.objects.select_for_update().get(pk=account.pk)
+        if account_locked.balance < amount:
+            return Response({'error': 'Insufficient balance.'}, status=400)
+        account_locked.balance -= amount
+        account_locked.save()
+        fd = FixedDeposit.objects.create(
+            bank_account=account_locked,
+            amount=amount,
+            tenure_months=tenure,
+            interest_rate=Decimal(str(rate)),
+            maturity_date=maturity_date,
+            maturity_amount=Decimal(str(maturity_amount)),
+        )
+        from transaction.models import Transaction
+        Transaction.objects.create(
+            sender=account_locked,
+            receiver=None,
+            amount=amount,
+            status='Completed',
+            TransactionType='FD_OPENING',
+        )
+
+    _notify(request.user, 'Fixed Deposit Opened',
+            f'FD of ₹{float(amount):,.2f} for {tenure} months opened. Matures on {maturity_date}.',
+            'fd', '/FixedDeposits')
+    return Response({
+        'id': fd.id,
+        'amount': str(fd.amount),
+        'tenure_months': fd.tenure_months,
+        'interest_rate': str(fd.interest_rate),
+        'start_date': str(fd.start_date),
+        'maturity_date': str(fd.maturity_date),
+        'maturity_amount': str(fd.maturity_amount),
+        'status': fd.status,
+    }, status=201)
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def close_fixed_deposit(request, pk):
+    from .models import FixedDeposit
+    from django.utils import timezone as tz
+    from django.db import transaction as db_tx
+    try:
+        account = BankAccount.objects.get(user=request.user)
+        fd = FixedDeposit.objects.get(pk=pk, bank_account=account, status='active')
+    except (BankAccount.DoesNotExist, FixedDeposit.DoesNotExist):
+        return Response({'error': 'FD not found or already closed.'}, status=404)
+
+    today = tz.now().date()
+    is_premature = today < fd.maturity_date
+    if is_premature:
+        # 1% penalty on interest
+        interest_earned = float(fd.maturity_amount) - float(fd.amount)
+        penalty = interest_earned * 0.01
+        credit_amount = Decimal(str(round(float(fd.amount) + interest_earned - penalty, 2)))
+    else:
+        credit_amount = fd.maturity_amount
+
+    with db_tx.atomic():
+        account_locked = BankAccount.objects.select_for_update().get(pk=account.pk)
+        account_locked.balance += credit_amount
+        account_locked.save()
+        fd.status = 'closed' if is_premature else 'matured'
+        fd.save()
+        from transaction.models import Transaction
+        Transaction.objects.create(
+            sender=None,
+            receiver=account_locked,
+            amount=credit_amount,
+            status='Completed',
+            TransactionType='FD_CLOSURE',
+        )
+
+    label = 'Closed Early' if is_premature else 'Matured'
+    _notify(request.user, f'Fixed Deposit {label}',
+            f'Your FD of ₹{float(fd.amount):,.2f} has been closed. ₹{float(credit_amount):,.2f} credited to your account.',
+            'fd', '/FixedDeposits')
+    return Response({
+        'credited': str(credit_amount),
+        'premature': is_premature,
+        'status': fd.status,
+    })
+
+
+# ── Notification helper ───────────────────────────────────────────────────────
+def _notify(user, title, message, ntype='system', link=''):
+    from .models import Notification
+    try:
+        Notification.objects.create(
+            user=user, title=title, message=message,
+            notification_type=ntype, link=link,
+        )
+    except Exception:
+        pass
+
+
+# ── Notifications (Customer) ──────────────────────────────────────────────────
+@api_view(['GET', 'POST'])
+@permission_classes([IsAuthenticated])
+def notifications_view(request):
+    from .models import Notification
+    if request.method == 'GET':
+        unread_only = request.query_params.get('unread_only') == '1'
+        qs = Notification.objects.filter(user=request.user)
+        if unread_only:
+            qs = qs.filter(is_read=False)
+        return Response([{
+            'id': n.id,
+            'title': n.title,
+            'message': n.message,
+            'notification_type': n.notification_type,
+            'is_read': n.is_read,
+            'link': n.link,
+            'created_at': n.created_at.isoformat(),
+        } for n in qs[:50]])
+
+    # POST — mark all as read
+    Notification.objects.filter(user=request.user, is_read=False).update(is_read=True)
+    return Response({'status': 'ok'})
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def unread_count_view(request):
+    from .models import Notification
+    count = Notification.objects.filter(user=request.user, is_read=False).count()
+    return Response({'count': count})
+
+
+@api_view(['PATCH', 'DELETE'])
+@permission_classes([IsAuthenticated])
+def notification_detail_view(request, pk):
+    from .models import Notification
+    try:
+        n = Notification.objects.get(pk=pk, user=request.user)
+    except Notification.DoesNotExist:
+        return Response({'error': 'Not found.'}, status=404)
+    if request.method == 'DELETE':
+        n.delete()
+        return Response(status=204)
+    n.is_read = True
+    n.save()
+    return Response({'id': n.id, 'is_read': n.is_read})
+
+
+# ── Support Tickets ───────────────────────────────────────────────────────────
+def _ticket_number():
+    import string
+    chars = string.ascii_uppercase + string.digits
+    from .models import SupportTicket
+    while True:
+        num = 'TKT-' + ''.join(random.choices(chars, k=8))
+        if not SupportTicket.objects.filter(ticket_number=num).exists():
+            return num
+
+
+def _ticket_data(t, include_messages=False):
+    d = {
+        'id': t.id,
+        'ticket_number': t.ticket_number,
+        'subject': t.subject,
+        'category': t.category,
+        'status': t.status,
+        'priority': t.priority,
+        'created_at': t.created_at.isoformat(),
+        'updated_at': t.updated_at.isoformat(),
+        'message_count': t.messages.count(),
+    }
+    if include_messages:
+        d['messages'] = [{
+            'id': m.id,
+            'sender': m.sender.get_full_name() or m.sender.username,
+            'is_staff': m.is_staff,
+            'body': m.body,
+            'created_at': m.created_at.isoformat(),
+        } for m in t.messages.all()]
+    return d
+
+
+@api_view(['GET', 'POST'])
+@permission_classes([IsAuthenticated])
+def support_tickets_view(request):
+    from .models import SupportTicket, TicketMessage
+    if request.method == 'GET':
+        tickets = SupportTicket.objects.filter(user=request.user).prefetch_related('messages')
+        return Response([_ticket_data(t) for t in tickets])
+
+    subject = request.data.get('subject', '').strip()
+    category = request.data.get('category', 'other')
+    body = request.data.get('body', '').strip()
+
+    if not subject:
+        return Response({'error': 'Subject is required.'}, status=400)
+    if not body:
+        return Response({'error': 'Please describe your issue.'}, status=400)
+    if len(subject) > 150:
+        return Response({'error': 'Subject must be under 150 characters.'}, status=400)
+
+    ticket = SupportTicket.objects.create(
+        user=request.user,
+        ticket_number=_ticket_number(),
+        subject=subject,
+        category=category,
+    )
+    TicketMessage.objects.create(ticket=ticket, sender=request.user, is_staff=False, body=body)
+    _notify(request.user, 'Support Ticket Created',
+            f'Ticket {ticket.ticket_number} has been created. We\'ll get back to you soon.',
+            'system', '/Support')
+    return Response(_ticket_data(ticket, include_messages=True), status=201)
+
+
+@api_view(['GET', 'POST'])
+@permission_classes([IsAuthenticated])
+def support_ticket_detail_view(request, pk):
+    from .models import SupportTicket, TicketMessage
+    try:
+        ticket = SupportTicket.objects.prefetch_related('messages').get(pk=pk, user=request.user)
+    except SupportTicket.DoesNotExist:
+        return Response({'error': 'Ticket not found.'}, status=404)
+
+    if request.method == 'GET':
+        return Response(_ticket_data(ticket, include_messages=True))
+
+    if ticket.status in ('resolved', 'closed'):
+        return Response({'error': 'This ticket is closed. Please open a new ticket.'}, status=400)
+
+    body = request.data.get('body', '').strip()
+    if not body:
+        return Response({'error': 'Message cannot be empty.'}, status=400)
+
+    TicketMessage.objects.create(ticket=ticket, sender=request.user, is_staff=False, body=body)
+    ticket.status = 'open'
+    ticket.save()
+    return Response(_ticket_data(ticket, include_messages=True))
+
+
+# ── Support Tickets (Admin) ───────────────────────────────────────────────────
+@api_view(['GET'])
+@permission_classes([IsAdminUser])
+def admin_support_tickets_view(request):
+    from .models import SupportTicket
+    qs = SupportTicket.objects.select_related('user').prefetch_related('messages').order_by('-created_at')
+    status_filter = request.query_params.get('status', '')
+    priority_filter = request.query_params.get('priority', '')
+    category_filter = request.query_params.get('category', '')
+    if status_filter:
+        qs = qs.filter(status=status_filter)
+    if priority_filter:
+        qs = qs.filter(priority=priority_filter)
+    if category_filter:
+        qs = qs.filter(category=category_filter)
+    result = []
+    for t in qs:
+        d = _ticket_data(t)
+        d['username'] = t.user.username
+        d['user_email'] = t.user.email
+        result.append(d)
+    return Response(result)
+
+
+@api_view(['GET', 'PATCH', 'POST'])
+@permission_classes([IsAdminUser])
+def admin_support_ticket_detail_view(request, pk):
+    from .models import SupportTicket, TicketMessage
+    try:
+        ticket = SupportTicket.objects.select_related('user').prefetch_related('messages').get(pk=pk)
+    except SupportTicket.DoesNotExist:
+        return Response({'error': 'Ticket not found.'}, status=404)
+
+    if request.method == 'GET':
+        d = _ticket_data(ticket, include_messages=True)
+        d['username'] = ticket.user.username
+        d['user_email'] = ticket.user.email
+        return Response(d)
+
+    if request.method == 'PATCH':
+        new_status = request.data.get('status', ticket.status)
+        new_priority = request.data.get('priority', ticket.priority)
+        ticket.status = new_status
+        ticket.priority = new_priority
+        ticket.save()
+        status_labels = {'open': 'Open', 'in_progress': 'In Progress', 'resolved': 'Resolved', 'closed': 'Closed'}
+        if new_status in ('resolved', 'closed'):
+            _notify(ticket.user, f'Ticket {ticket.ticket_number} {status_labels.get(new_status, new_status)}',
+                    f'Your support ticket "{ticket.subject}" has been marked as {status_labels.get(new_status, new_status)}.',
+                    'system', '/Support')
+        return Response(_ticket_data(ticket))
+
+    # POST — admin reply
+    body = request.data.get('body', '').strip()
+    if not body:
+        return Response({'error': 'Reply cannot be empty.'}, status=400)
+    TicketMessage.objects.create(ticket=ticket, sender=request.user, is_staff=True, body=body)
+    ticket.status = 'in_progress'
+    ticket.save()
+    _notify(ticket.user, f'Support Reply on {ticket.ticket_number}',
+            f'Staff replied to your ticket: "{ticket.subject}".',
+            'system', '/Support')
+    return Response(_ticket_data(ticket, include_messages=True))

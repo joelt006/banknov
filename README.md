@@ -1,185 +1,316 @@
 # MyBank — Full-Stack Banking Application
 
-A full-stack banking web application built with **Django REST Framework** (backend) and **Vue 3** (frontend). It supports customer banking operations and a dedicated staff admin portal.
+A full-featured digital banking platform built with **Django REST Framework** (backend) and **Vue 3** (frontend). Covers everything from account creation and money transfers to loans, fixed deposits, card management, notifications, and customer support.
 
 ---
 
 ## Tech Stack
 
-| Layer     | Technology                                      |
-|-----------|-------------------------------------------------|
-| Backend   | Python 3, Django 5, Django REST Framework       |
-| Auth      | SimpleJWT (Bearer tokens)                       |
-| Database  | SQLite (dev) — swap for PostgreSQL in prod      |
-| Frontend  | Vue 3, Vue Router 4, Vuex 4                     |
-| HTTP      | Axios                                           |
-| Build     | Vite 5                                          |
+| Layer | Technology |
+|-------|-----------|
+| Backend | Django 5, Django REST Framework, SimpleJWT |
+| Frontend | Vue 3 (Options API), Vue Router 4, Vuex 4, Axios |
+| Database | SQLite (dev) |
+| Auth | JWT tokens + OTP via email |
+| Styling | Scoped CSS, CSS custom properties, no external UI library |
 
 ---
 
 ## Project Structure
 
+```
 banknov/
-├── mybank/                  # Django backend
-│   ├── account/             # Accounts, auth, card requests app
-│   │   ├── models.py        # BankAccount, CardRequest, ...
-│   │   ├── views.py         # All API views
-│   │   ├── urls.py          # Account + admin API routes
-│   │   └── migrations/
-│   ├── transaction/         # Transactions app
-│   ├── mybank/              # Django project settings
-│   │   ├── settings.py
+├── mybank/                  # Django project root
+│   ├── account/             # Core banking app
+│   │   ├── models.py        # All models
+│   │   ├── views.py         # All account/feature views
+│   │   ├── urls.py          # URL patterns
+│   │   └── migrations/      # 17 migrations
+│   ├── transaction/         # Transaction app
+│   │   ├── models.py        # Transaction, Beneficiary, ScheduledTransfer
+│   │   ├── views.py         # Send money, beneficiaries, scheduled transfers
 │   │   └── urls.py
-│   └── manage.py
+│   └── mybank/              # Django settings & root urls
 └── ui/                      # Vue 3 frontend
-└── src/
-├── views/           # All page components
-├── services/        # apiClient.js, adminApiClient.js
-├── router/          # Vue Router with auth guards
-├── store/           # Vuex store
-└── App.vue          # Shell layouts (customer + admin)
-
-
+    └── src/
+        ├── views/           # All page components
+        ├── router/          # Vue Router config
+        ├── store/           # Vuex store
+        └── App.vue          # Shell layout (customer + admin)
+```
 
 ---
 
 ## Features
 
-### Customer Portal
-- **Register** — Create a bank account first, then register with that account number
-- **OTP Verification** — Email OTP on registration
-- **Login / Logout** — JWT authentication
-- **Dashboard** — Account balance, account number, recent overview
-- **Send Money** — Transfer funds to another account number
-- **Deposit Money** — Add funds to your account
-- **Transaction History** — Full statement of all transactions
-- **Profile & Edit Profile** — View and update personal details
-- **My Cards** — View Classic / Gold / Platinum card designs and **request a card**
-  - Card request shows live status: Pending / Approved / Rejected
-  - Full request history with admin notes
+### Authentication & Security
 
-### Staff Admin Portal (separate login at `/AdminLogin`)
-- **Dashboard** — KPI cards (customers, accounts, balance, transactions), 7-day transaction bar chart, account type donut chart, recent transactions table
-- **Account Management** — View all accounts (Standard / Minor / Senior), freeze/unfreeze accounts, edit balances inline
-- **Card Requests** — Approve or reject customer card requests with optional staff notes; red badge on sidebar shows pending count
+| Feature | Details |
+|---------|---------|
+| Registration | OTP verified via email |
+| Login | Username/password + OTP second factor + CAPTCHA |
+| Forgot Password | OTP-based reset flow |
+| Change Password | In-app with current password verification |
+| Transaction PIN | 4-digit PIN, bcrypt-hashed, required for all outgoing transfers |
+| JWT Auth | Access tokens stored in `localStorage`, sent as `Bearer` header |
+| Rate Limiting | Cache-based limiting on login attempts and PIN entries |
+| Session Management | List all active sessions with device/IP info, revoke individually |
+| Login History | Full timestamped login log with success/failure reasons |
 
 ---
 
-## Getting Started
+### Account Management
 
-### Prerequisites
-- Python 3.10+
-- Node.js 18+
-- pip
+- **Account Types** — Regular, Minor, Senior (separate creation flows)
+- **Account Details page** — Balance (show/hide toggle), account number + IFSC copy buttons, branch, account type, status, date opened
+- **Profile** — View and edit personal details (name, address, contact, photo)
+- **Admin: Freeze / Unfreeze** — Admin can freeze accounts; frozen accounts block all outgoing transactions
 
-### Backend Setup
+---
+
+### Transfers & Payments
+
+- **Send Money** — Instant transfer with transaction PIN verification; atomic balance update with `select_for_update`
+- **Beneficiaries** — Save, list, and delete frequent recipients; quick-select chips on Send Money page
+- **Scheduled Transfers** — Future-dated transfers; PIN verified at creation time; cancellable while pending
+- **Transaction Statement** — Full history with date-range filter, CSV export, and browser print
+
+---
+
+### My Cards
+
+- **Request Cards** — Classic, Gold, Platinum; one per type; pending / approved / rejected status
+- **Card Details** — Card number, expiry date, CVV (admin-generated on approval)
+- **Block / Unblock** — Toggle card block status instantly
+- **Card Controls** — Per-card toggle switches for International, Online, and Contactless transactions
+
+---
+
+### Loans
+
+- **Loan Types** — Personal (12%), Home (8.5%), Car (9%), Education (8%)
+- **Apply** — Amount, tenure (months), purpose; max 3 active/pending loans at once
+- **Live EMI Calculator** — Updates instantly using `P × r(1+r)^n / ((1+r)^n - 1)`
+- **Admin Review** — Approve with a custom approved amount (disbursed directly to balance) or reject with a note
+- **Loan Disbursal** — Atomic balance credit + `LOAN_DISBURSAL` transaction record on approval
+
+---
+
+### Fixed Deposits
+
+- **Tenure Options** — 3 / 6 / 12 / 24 / 36 / 60 months
+- **Interest Rates** — 4.5% → 7.5% (compound, annually)
+- **Open FD** — Deducted atomically from balance; `FD_OPENING` transaction created
+- **Live Maturity Preview** — Shows maturity amount and date before opening
+- **Maturity Progress Bar** — Visual progress on each active FD card
+- **Close FD** — Full maturity amount at or after maturity date; 1% penalty on interest if premature
+
+---
+
+### Notifications & Alerts
+
+- **Bell Icon** — Topbar badge showing unread count; polls every 30 seconds
+- **Dropdown** — Last 6 notifications with type-coloured icons; click marks as read and navigates
+- **Full Notifications Page** — All / Unread tabs, type filter (Transaction / Loan / FD / Card / Security / System)
+- **Mark All Read** — Single button to clear all unread
+- **Delete** — Per-notification delete; clear-all with confirmation modal
+- **Auto-triggered for:**
+  - Money sent (sender) and money received (recipient)
+  - Card request submitted, approved, or rejected
+  - Loan application submitted, approved, or rejected
+  - Fixed deposit opened, closed, or matured
+  - Support ticket created, staff replied, status changed
+
+---
+
+### Customer Support
+
+- **Raise a Ticket** — Category (Account / Transaction / Card / Loan / FD / Technical / Other), subject, description
+- **Ticket Numbers** — Auto-generated `TKT-XXXXXXXX` format
+- **Threaded Chat View** — Customer messages and staff replies in a chat-style thread
+- **Status Tracking** — Open → In Progress → Resolved / Closed
+- **Reply** — Customer can reply to open/in-progress tickets; Ctrl+Enter shortcut
+- **FAQ Accordion** — 5 built-in common questions to reduce ticket volume
+- **Admin: Support Tickets** — Filter by status, priority, category; inline status/priority dropdowns; staff reply with indigo-style bubbles
+
+---
+
+### Admin Portal
+
+Separate login flow (OTP-protected), distinct sidebar and shell styling.
+
+| Section | Capabilities |
+|---------|-------------|
+| Dashboard | Total accounts, balance, transactions, pending card requests |
+| Account Management | List all accounts, freeze/unfreeze, manual deposit |
+| Transactions | View all transactions across accounts |
+| Card Requests | Approve (generates card number, expiry, CVV) or reject with note |
+| Loan Applications | Filter by status; approve with custom amount (auto-disburses); reject with note |
+| Support Tickets | Full ticket list with filters; reply as staff; update status and priority |
+
+---
+
+## API Endpoints
+
+### Auth & Profile (`/accounts/`)
+```
+POST   register/                  Register new user
+POST   verify_otp/                Verify registration OTP
+POST   login/                     Login (returns JWT)
+POST   login/verify-otp/          Verify login OTP
+POST   logout/                    Invalidate token
+GET    captcha/                   Get CAPTCHA challenge
+POST   forgot-password/           Send reset OTP
+POST   reset-password/            Reset with OTP
+POST   change-password/           Change password (auth required)
+GET    profile/                   Get profile
+PATCH  edit-profile/              Update profile
+GET    user/                      Get logged-in user info
+GET    balance/                   Get balance + account details
+GET/POST pin-status/ set-pin/     Transaction PIN management
+GET    sessions/                  List active sessions
+DELETE sessions/<key>/            Revoke a session
+GET    login-history/             Login log
+```
+
+### Cards (`/accounts/`)
+```
+GET/POST  card-requests/                    List / request a card
+GET/PATCH card-requests/<id>/settings/      Get / update card controls
+```
+
+### Loans & FDs (`/accounts/`)
+```
+GET/POST  loans/                            List / apply for loan
+GET/POST  fixed-deposits/                   List / open FD
+POST      fixed-deposits/<id>/close/        Close / claim FD
+```
+
+### Notifications (`/accounts/`)
+```
+GET/POST  notifications/                    List / mark all read
+GET       notifications/unread-count/       Unread count (for polling)
+PATCH     notifications/<id>/              Mark one as read
+DELETE    notifications/<id>/              Delete one
+```
+
+### Support (`/accounts/`)
+```
+GET/POST  support/                          List tickets / create ticket
+GET/POST  support/<id>/                     Get ticket + messages / reply
+```
+
+### Transactions (`/transactions/`)
+```
+POST      send-money/                       Instant transfer
+GET       statement/                        Transaction history
+GET/POST  beneficiaries/                    List / add beneficiary
+DELETE    beneficiaries/<id>/               Remove beneficiary
+GET/POST  scheduled/                        List / create scheduled transfer
+DELETE    scheduled/<id>/                   Cancel scheduled transfer
+```
+
+### Admin (`/accounts/admin/`)
+```
+POST      login/                            Admin login
+POST      login/verify-otp/                 Verify admin OTP
+GET       stats/                            Dashboard stats
+GET       accounts/                         List all accounts
+PATCH     accounts/<id>/                    Freeze / deposit
+GET       transactions/                     All transactions
+GET       card-requests/                    List card requests
+PATCH     card-requests/<id>/               Approve / reject card
+GET       loans/                            List loan applications
+PATCH     loans/<id>/                       Approve / reject loan
+GET       support/                          List all tickets
+GET/PATCH/POST support/<id>/               View / update / reply to ticket
+```
+
+---
+
+## Setup & Running
+
+### Backend
 
 ```bash
 cd mybank
-
-# Create and activate virtual environment
-python -m venv venv
-source venv/bin/activate       # Windows: venv\Scripts\activate
-
-# Install dependencies
-pip install django djangorestframework djangorestframework-simplejwt \
-            django-cors-headers pillow pytesseract
-
-# Copy env file and fill in values
-cp .env.example .env
-
-# Run migrations
+pip install -r requirements.txt
 python manage.py migrate
-
-# Create a superuser (for admin portal access)
-python manage.py createsuperuser
-
-# Start server
+python manage.py createsuperuser   # for admin portal access
 python manage.py runserver
-Backend runs at http://127.0.0.1:8000
+```
 
-Frontend Setup
+**Email config** — set in `settings.py`:
+```python
+EMAIL_HOST = 'smtp.gmail.com'
+EMAIL_HOST_USER = 'your@email.com'
+EMAIL_HOST_PASSWORD = 'your-app-password'
+```
 
+**Process scheduled transfers** (run via cron or manually):
+```bash
+python manage.py process_scheduled_transfers
+```
+
+### Frontend
+
+```bash
 cd ui
 npm install
 npm run dev
-Frontend runs at http://localhost:5173
+```
 
-Environment Variables
-Create mybank/.env (see .env.example):
+App runs at `http://localhost:5173`, API at `http://127.0.0.1:8000`.
 
+---
 
-SECRET_KEY=your-django-secret-key
-DEBUG=True
-EMAIL_HOST=smtp.gmail.com
-EMAIL_PORT=587
-EMAIL_HOST_USER=your@email.com
-EMAIL_HOST_PASSWORD=your-app-password
-Account Types
-Type	Description
-Standard	Regular adult account with balance
-Minor	Account for minors (under 18)
-Senior	Account for senior citizens
-API Overview
-Customer Endpoints (/accounts/)
-Method	Endpoint	Description	Auth
-POST	CreateBankAccount/	Create bank account	Public
-POST	register/	Register user	Public
-POST	verify_otp/	Verify email OTP	Public
-POST	login/	Customer login	Public
-GET	profile/	Get profile	Required
-POST	edit-profile/	Update profile	Required
-GET	balance/	Get balance + account #	Required
-POST	send-money/	Send money	Required
-GET/POST	card-requests/	List / create card requests	Required
-Admin Endpoints (/accounts/admin/)
-Method	Endpoint	Description	Auth
-POST	login/	Staff login	Public
-GET	stats/	Dashboard KPIs + chart data	Staff only
-GET	accounts/	List all accounts	Staff only
-PATCH	accounts/<id>/	Freeze / edit balance	Staff only
-GET	card-requests/	List card requests	Staff only
-PATCH	card-requests/<id>/	Approve / reject request	Staff only
-Transaction Endpoints (/transactions/)
-Method	Endpoint	Description	Auth
-GET	statement/	Transaction history	Required
-POST	deposit/	Deposit money	Required
-Admin Portal Access
-Navigate to http://localhost:5173/AdminLogin
-Sign in with your Django superuser or staff account
-You'll land on the admin dashboard
-To make a user staff via Django shell:
+## Database Models
 
+| Model | App | Purpose |
+|-------|-----|---------|
+| `BankAccount` | account | Main savings account |
+| `BankAccountminor` | account | Minor account |
+| `BankAccountsenior` | account | Senior account |
+| `CardRequest` | account | Card request + controls |
+| `LoanApplication` | account | Loan application lifecycle |
+| `FixedDeposit` | account | FD record |
+| `Notification` | account | In-app alerts |
+| `SupportTicket` | account | Customer support ticket |
+| `TicketMessage` | account | Threaded ticket messages |
+| `LoginHistory` | account | Login audit log |
+| `UserSession` | account | Active session tracking |
+| `Transaction` | transaction | Money movement record |
+| `Beneficiary` | transaction | Saved recipients |
+| `ScheduledTransfer` | transaction | Future-dated transfers |
 
-python manage.py shell
->>> from django.contrib.auth.models import User
->>> u = User.objects.get(username='yourusername')
->>> u.is_staff = True
->>> u.save()
-Card Request Flow
+---
 
-Customer selects card type (Classic / Gold / Platinum)
-        ↓
-Clicks "Request Card" on My Cards page
-        ↓
-Request saved as "Pending"
-        ↓
-Admin reviews at /Admin/CardRequests
-        ↓
-Admin approves or rejects with optional note
-        ↓
-Customer sees updated status on My Cards page
-Registration Flow
+## Frontend Routes
 
-Create Bank Account → receive account number
-        ↓
-Register with that account number + email + password
-        ↓
-Verify OTP sent to email
-        ↓
-Login → JWT token stored → access dashboard
-Notes
-db.sqlite3 is excluded from git — each developer gets their own local database
-Run python manage.py migrate after pulling new migrations
-The admin portal uses a completely separate JWT token (adminToken) from the customer portal (token)
-All admin endpoints require is_staff=True on the Django user
+### Customer (requires auth)
+| Route | Page |
+|-------|------|
+| `/Dashboard` | Balance overview, quick actions |
+| `/AccountDetails` | Full account info |
+| `/SendMoney` | Transfer with beneficiary quick-select |
+| `/Beneficiaries` | Manage saved recipients |
+| `/ScheduledTransfers` | View / cancel scheduled transfers |
+| `/TransactionStatement` | History with filter, CSV, print |
+| `/MyCards` | Card management + controls |
+| `/Loans` | Loan list + apply with EMI preview |
+| `/FixedDeposits` | FD list + open new FD |
+| `/Notifications` | Full notification centre |
+| `/Support` | Raise tickets + chat thread |
+| `/Profile` | View profile |
+| `/EditProfile` | Edit personal details |
+| `/Security` | Password, PIN, sessions, login history |
+
+### Admin (requires admin auth)
+| Route | Page |
+|-------|------|
+| `/AdminLogin` | Admin login |
+| `/Admin/Dashboard` | Stats overview |
+| `/Admin/Accounts` | Account management |
+| `/Admin/CardRequests` | Card request review |
+| `/Admin/Loans` | Loan application review |
+| `/Admin/Support` | Support ticket management |

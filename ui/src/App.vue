@@ -8,26 +8,34 @@ const route = useRoute()
 const router = useRouter()
 const store = useStore()
 
-const protectedRoutes = ['Dashboard', 'Profile', 'EditProfile', 'TransactionStatement', 'SendMoney', 'DepositMoney', 'MyCards', 'BankAdmin']
-const adminRoutes = ['AdminDashboard', 'AdminAccounts', 'AdminCardRequests']
+const protectedRoutes = ['Dashboard', 'Profile', 'EditProfile', 'TransactionStatement', 'SendMoney', 'MyCards', 'Security', 'Beneficiaries', 'ScheduledTransfers', 'AccountDetails', 'Loans', 'FixedDeposits', 'Notifications', 'Support']
+const adminRoutes = ['AdminDashboard', 'AdminAccounts', 'AdminCardRequests', 'AdminLoans', 'AdminSupport']
 
 const isProtectedRoute = computed(() => protectedRoutes.includes(route.name))
 const isAdminRoute = computed(() => adminRoutes.includes(route.name))
 
 const pageTitles = {
   Dashboard: 'Dashboard',
+  AccountDetails: 'Account Details',
   SendMoney: 'Send Money',
-  DepositMoney: 'Deposit Money',
   TransactionStatement: 'Transaction History',
   Profile: 'My Profile',
   EditProfile: 'Edit Profile',
   MyCards: 'My Cards',
-  BankAdmin: 'Admin Panel',
+  Security: 'Security Settings',
+  Beneficiaries: 'Beneficiaries',
+  ScheduledTransfers: 'Scheduled Transfers',
+  Loans: 'Loans',
+  FixedDeposits: 'Fixed Deposits',
+  Notifications: 'Notifications',
+  Support: 'Customer Support',
 }
 const adminPageTitles = {
   AdminDashboard: 'Dashboard',
   AdminAccounts: 'Account Management',
   AdminCardRequests: 'Card Requests',
+  AdminLoans: 'Loan Applications',
+  AdminSupport: 'Customer Support',
 }
 const pageTitle = computed(() => pageTitles[route.name] || '')
 const adminPageTitle = computed(() => adminPageTitles[route.name] || '')
@@ -37,7 +45,8 @@ const userInitial = computed(() => (username.value?.[0] || 'U').toUpperCase())
 const adminUsername = computed(() => localStorage.getItem('adminUsername') || 'Admin')
 const adminInitial = computed(() => (adminUsername.value?.[0] || 'A').toUpperCase())
 
-function logout() {
+async function logout() {
+  try { await axios.post('http://127.0.0.1:8000/accounts/logout/', {}, { headers: { Authorization: `Bearer ${localStorage.getItem('token')}` } }) } catch { /* silent */ }
   store.dispatch('logout')
   router.push('/Login')
 }
@@ -49,6 +58,9 @@ function adminLogout() {
 }
 
 const pendingCardCount = ref(0)
+const unreadCount = ref(0)
+const notifOpen = ref(false)
+const recentNotifs = ref([])
 
 async function fetchPendingCount() {
   const token = localStorage.getItem('adminToken')
@@ -61,7 +73,87 @@ async function fetchPendingCount() {
   } catch { /* ignore */ }
 }
 
+async function fetchUnreadCount() {
+  const token = localStorage.getItem('token')
+  if (!token) return
+  try {
+    const res = await axios.get('http://127.0.0.1:8000/accounts/notifications/unread-count/', {
+      headers: { Authorization: `Bearer ${token}` },
+    })
+    unreadCount.value = res.data.count
+  } catch { /* ignore */ }
+}
+
+async function fetchRecentNotifs() {
+  const token = localStorage.getItem('token')
+  if (!token) return
+  try {
+    const res = await axios.get('http://127.0.0.1:8000/accounts/notifications/', {
+      headers: { Authorization: `Bearer ${token}` },
+    })
+    recentNotifs.value = res.data.slice(0, 6)
+  } catch { /* ignore */ }
+}
+
+async function markAllRead() {
+  const token = localStorage.getItem('token')
+  if (!token) return
+  try {
+    await axios.post('http://127.0.0.1:8000/accounts/notifications/', {}, {
+      headers: { Authorization: `Bearer ${token}` },
+    })
+    unreadCount.value = 0
+    recentNotifs.value.forEach(n => { n.is_read = true })
+  } catch { /* ignore */ }
+}
+
+async function markOneRead(notif) {
+  if (notif.is_read) return
+  const token = localStorage.getItem('token')
+  try {
+    await axios.patch(`http://127.0.0.1:8000/accounts/notifications/${notif.id}/`, {}, {
+      headers: { Authorization: `Bearer ${token}` },
+    })
+    notif.is_read = true
+    if (unreadCount.value > 0) unreadCount.value--
+  } catch { /* ignore */ }
+}
+
+function openNotifDropdown() {
+  notifOpen.value = !notifOpen.value
+  if (notifOpen.value) fetchRecentNotifs()
+}
+
+function closeNotifDropdown() { notifOpen.value = false }
+
+let unreadTimer = null
+watch(isProtectedRoute, (val) => {
+  if (val) {
+    fetchUnreadCount()
+    unreadTimer = setInterval(fetchUnreadCount, 30000)
+  } else {
+    clearInterval(unreadTimer)
+  }
+}, { immediate: true })
+
 watch(isAdminRoute, (val) => { if (val) fetchPendingCount() }, { immediate: true })
+
+function timeAgo(iso) {
+  const diff = (Date.now() - new Date(iso)) / 1000
+  if (diff < 60) return 'just now'
+  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`
+  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`
+  return `${Math.floor(diff / 86400)}d ago`
+}
+
+// v-click-outside directive
+const vClickOutside = {
+  mounted(el, binding) {
+    el._clickOutside = (e) => { if (!el.contains(e.target)) binding.value(e) }
+    document.addEventListener('click', el._clickOutside)
+  },
+  unmounted(el) { document.removeEventListener('click', el._clickOutside) },
+}
 </script>
 
 <template>
@@ -79,13 +171,21 @@ watch(isAdminRoute, (val) => { if (val) fetchPendingCount() }, { immediate: true
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>
             Dashboard
           </RouterLink>
+          <RouterLink to="/AccountDetails" class="nav-item" active-class="active">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="1" y="4" width="22" height="16" rx="2" ry="2"/><line x1="1" y1="10" x2="23" y2="10"/></svg>
+            Account
+          </RouterLink>
           <RouterLink to="/SendMoney" class="nav-item" active-class="active">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
             Send Money
           </RouterLink>
-          <RouterLink to="/DepositMoney" class="nav-item" active-class="active">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><polyline points="19 12 12 19 5 12"/></svg>
-            Deposit
+          <RouterLink to="/Beneficiaries" class="nav-item" active-class="active">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><line x1="19" y1="8" x2="19" y2="14"/><line x1="22" y1="11" x2="16" y2="11"/></svg>
+            Beneficiaries
+          </RouterLink>
+          <RouterLink to="/ScheduledTransfers" class="nav-item" active-class="active">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+            Scheduled
           </RouterLink>
           <RouterLink to="/TransactionStatement" class="nav-item" active-class="active">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg>
@@ -103,9 +203,26 @@ watch(isAdminRoute, (val) => { if (val) fetchPendingCount() }, { immediate: true
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="1" y="4" width="22" height="16" rx="2" ry="2"/><line x1="1" y1="10" x2="23" y2="10"/></svg>
             My Cards
           </RouterLink>
-          <RouterLink to="/BankAdmin" class="nav-item" active-class="active">
+          <RouterLink to="/Loans" class="nav-item" active-class="active">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2z"/><path d="M8 12h8M12 8v8"/></svg>
+            Loans
+          </RouterLink>
+          <RouterLink to="/FixedDeposits" class="nav-item" active-class="active">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="7" width="20" height="14" rx="2"/><path d="M16 7V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v2"/><line x1="12" y1="12" x2="12" y2="16"/><line x1="10" y1="14" x2="14" y2="14"/></svg>
+            Fixed Deposits
+          </RouterLink>
+          <RouterLink to="/Security" class="nav-item" active-class="active">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
-            Admin
+            Security
+          </RouterLink>
+          <RouterLink to="/Notifications" class="nav-item" active-class="active">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>
+            Notifications
+            <span v-if="unreadCount > 0" class="nav-badge">{{ unreadCount > 99 ? '99+' : unreadCount }}</span>
+          </RouterLink>
+          <RouterLink to="/Support" class="nav-item" active-class="active">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+            Support
           </RouterLink>
         </nav>
 
@@ -121,6 +238,50 @@ watch(isAdminRoute, (val) => { if (val) fetchPendingCount() }, { immediate: true
         <header class="topbar">
           <h1 class="page-title">{{ pageTitle }}</h1>
           <div class="topbar-right">
+            <!-- Notification bell -->
+            <div class="notif-wrap" v-click-outside="closeNotifDropdown">
+              <button class="notif-btn" @click="openNotifDropdown" :class="{ active: notifOpen }">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>
+                <span v-if="unreadCount > 0" class="notif-badge">{{ unreadCount > 99 ? '99+' : unreadCount }}</span>
+              </button>
+              <div v-if="notifOpen" class="notif-dropdown">
+                <div class="notif-dropdown-header">
+                  <span>Notifications</span>
+                  <button v-if="unreadCount > 0" class="mark-all-btn" @click="markAllRead">Mark all read</button>
+                </div>
+                <div class="notif-list" v-if="recentNotifs.length > 0">
+                  <RouterLink
+                    v-for="n in recentNotifs"
+                    :key="n.id"
+                    :to="n.link || '/Notifications'"
+                    class="notif-item"
+                    :class="{ unread: !n.is_read }"
+                    @click="markOneRead(n); closeNotifDropdown()"
+                  >
+                    <div class="notif-icon" :class="n.notification_type">
+                      <svg v-if="n.notification_type==='transaction'" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
+                      <svg v-else-if="n.notification_type==='loan'" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M8 12h8M12 8v8"/></svg>
+                      <svg v-else-if="n.notification_type==='fd'" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="7" width="20" height="14" rx="2"/><path d="M16 7V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v2"/></svg>
+                      <svg v-else-if="n.notification_type==='card'" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="1" y="4" width="22" height="16" rx="2"/><line x1="1" y1="10" x2="23" y2="10"/></svg>
+                      <svg v-else viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>
+                    </div>
+                    <div class="notif-content">
+                      <div class="notif-title">{{ n.title }}</div>
+                      <div class="notif-msg">{{ n.message }}</div>
+                      <div class="notif-time">{{ timeAgo(n.created_at) }}</div>
+                    </div>
+                    <div v-if="!n.is_read" class="unread-dot"></div>
+                  </RouterLink>
+                </div>
+                <div v-else class="notif-empty">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>
+                  <p>No notifications yet</p>
+                </div>
+                <RouterLink to="/Notifications" class="notif-see-all" @click="closeNotifDropdown">
+                  View all notifications
+                </RouterLink>
+              </div>
+            </div>
             <div class="user-chip">
               <div class="user-avatar">{{ userInitial }}</div>
               <span class="user-name">{{ username }}</span>
@@ -159,6 +320,14 @@ watch(isAdminRoute, (val) => { if (val) fetchPendingCount() }, { immediate: true
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="1" y="4" width="22" height="16" rx="2"/><line x1="1" y1="10" x2="23" y2="10"/></svg>
             Card Requests
             <span v-if="pendingCardCount > 0" class="nav-badge">{{ pendingCardCount }}</span>
+          </RouterLink>
+          <RouterLink to="/Admin/Loans" class="nav-item" active-class="active">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2z"/><path d="M8 12h8M12 8v8"/></svg>
+            Loan Applications
+          </RouterLink>
+          <RouterLink to="/Admin/Support" class="nav-item" active-class="active">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+            Support Tickets
           </RouterLink>
         </nav>
 
@@ -497,4 +666,119 @@ a { text-decoration: none; color: inherit; }
   justify-content: center;
   padding: 0 5px;
 }
+
+/* ── Notification bell ── */
+.notif-wrap {
+  position: relative;
+}
+
+.notif-btn {
+  position: relative;
+  width: 40px; height: 40px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+  transition: all .18s;
+  color: var(--muted);
+}
+.notif-btn svg { width: 20px; height: 20px; }
+.notif-btn:hover, .notif-btn.active {
+  background: var(--blue);
+  border-color: var(--blue);
+  color: #fff;
+}
+
+.notif-badge {
+  position: absolute;
+  top: -5px; right: -5px;
+  background: #ef4444;
+  color: #fff;
+  font-size: 10px; font-weight: 800;
+  min-width: 18px; height: 18px;
+  border-radius: 9px;
+  display: flex; align-items: center; justify-content: center;
+  padding: 0 4px;
+  border: 2px solid #fff;
+  pointer-events: none;
+}
+
+.notif-dropdown {
+  position: absolute;
+  top: calc(100% + 10px);
+  right: 0;
+  width: 360px;
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-lg);
+  z-index: 200;
+  overflow: hidden;
+}
+
+.notif-dropdown-header {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--border);
+  font-size: 14px; font-weight: 700; color: var(--text);
+}
+
+.mark-all-btn {
+  background: none; border: none; cursor: pointer;
+  font-size: 12px; font-weight: 600; color: var(--blue);
+  padding: 0;
+}
+.mark-all-btn:hover { text-decoration: underline; }
+
+.notif-list { max-height: 340px; overflow-y: auto; }
+
+.notif-item {
+  display: flex; align-items: flex-start; gap: 12px;
+  padding: 12px 16px;
+  border-bottom: 1px solid #f1f5f9;
+  transition: background .15s;
+  cursor: pointer;
+  text-decoration: none;
+  color: inherit;
+}
+.notif-item:hover { background: #f8fafc; }
+.notif-item.unread { background: #eff6ff; }
+.notif-item.unread:hover { background: #dbeafe; }
+
+.notif-icon {
+  width: 34px; height: 34px; border-radius: 8px; flex-shrink: 0;
+  display: flex; align-items: center; justify-content: center;
+}
+.notif-icon svg { width: 16px; height: 16px; }
+.notif-icon.transaction { background: #d1fae5; color: #065f46; }
+.notif-icon.loan        { background: #ede9fe; color: #5b21b6; }
+.notif-icon.fd          { background: #fef3c7; color: #b45309; }
+.notif-icon.card        { background: #dbeafe; color: #1d4ed8; }
+.notif-icon.security    { background: #fee2e2; color: #991b1b; }
+.notif-icon.system      { background: #f1f5f9; color: #475569; }
+
+.notif-content { flex: 1; min-width: 0; }
+.notif-title { font-size: 13px; font-weight: 700; color: var(--text); margin-bottom: 2px; }
+.notif-msg   { font-size: 12px; color: var(--muted); line-height: 1.4; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.notif-time  { font-size: 11px; color: #94a3b8; margin-top: 4px; }
+
+.unread-dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: var(--blue); flex-shrink: 0; margin-top: 4px;
+}
+
+.notif-empty {
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 8px; padding: 32px 20px; color: var(--muted); font-size: 13px;
+}
+.notif-empty svg { width: 36px; height: 36px; opacity: .35; }
+
+.notif-see-all {
+  display: block; text-align: center;
+  padding: 12px; font-size: 13px; font-weight: 600;
+  color: var(--blue); border-top: 1px solid var(--border);
+  transition: background .15s;
+}
+.notif-see-all:hover { background: #eff6ff; }
 </style>

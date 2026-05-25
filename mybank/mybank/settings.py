@@ -30,7 +30,7 @@ STATIC_ROOT = os.path.join(BASE_DIR, 'static')
 
 SECRET_KEY = os.environ.get('DJANGO_SECRET_KEY', 'django-insecure-change-me-in-production')
 
-DEBUG = os.environ.get('DJANGO_DEBUG', 'True') == 'True'
+DEBUG = os.environ.get('DJANGO_DEBUG', 'False') == 'True'
 
 ALLOWED_HOSTS = []
 
@@ -128,7 +128,7 @@ AUTH_PASSWORD_VALIDATORS = [
 # }
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': (
-        'rest_framework_simplejwt.authentication.JWTAuthentication',
+        'mybank.authentication.SessionJWTAuthentication',
     ),
 }
 
@@ -151,11 +151,9 @@ STATIC_URL = 'static/'
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
-CORS_ORIGIN_ALLOW_ALL = False  
 CORS_ALLOWED_ORIGINS = [
-    "http://localhost:5173", 
+    "http://localhost:5173",
 ]
-CORS_ALLOW_ALL_ORIGINS = True
 
 
 CORS_ALLOW_CREDENTIALS = True 
@@ -184,7 +182,7 @@ CSRF_COOKIE_NAME = 'csrftoken'
 CSRF_COOKIE_SECURE = True  # Not secure since we are running locally
 CSRF_COOKIE_HTTPONLY = False  # Avoid JavaScript access to CSRF token
 SESSION_COOKIE_SECURE = False  # Not secure since we are running locally
-SESSION_COOKIE_HTTPONLY = False  # Avoid JavaScript access to session data
+SESSION_COOKIE_HTTPONLY = True
 CSRF_COOKIE_SAMESITE = 'None'  # Allow cross-site cookies for same-site requests
 SESSION_COOKIE_SAMESITE = 'None'
 CSRF_HEADER_NAME = "HTTP_X_CSRFTOKEN"  # Default header name for CSRF token in the request
