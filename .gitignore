@@ -21,6 +21,7 @@ db.sqlite3
 *.log
 staticfiles/
 media/
+mybank/photos/
 
 # Encryption key — treat as a secret
 encryption_key.key
