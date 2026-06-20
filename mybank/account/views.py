@@ -4,13 +4,12 @@ from django.views.decorators.csrf import csrf_exempt
 from decimal import Decimal
 from rest_framework.decorators import api_view, permission_classes, authentication_classes
 from rest_framework.permissions import IsAuthenticated,AllowAny
-from django.utils.decorators import method_decorator
 from email.mime.multipart import MIMEMultipart
 from rest_framework.response import Response
 from django.middleware.csrf import get_token
 from django.contrib.auth.models import User
 from rest_framework.views import APIView
-from django.http import JsonResponse
+from django.http import JsonResponse, FileResponse
 from email.mime.text import MIMEText
 from django.core.cache import cache
 from .forms import EditProfileForm
@@ -24,6 +23,7 @@ import pytesseract
 import logging
 import smtplib
 import random
+import secrets
 import uuid
 import json
 from rest_framework_simplejwt.tokens import AccessToken
@@ -42,7 +42,7 @@ def _rate_limit(key, max_attempts=5, window_seconds=900):
 
 
 def generate_otp():
-    return random.randint(100000, 999999)
+    return secrets.randbelow(900000) + 100000
 def send_otp_email(user_email, otp):
     msg = MIMEMultipart("alternative")
     msg["Subject"] = "Your OTP Code"
@@ -464,20 +464,60 @@ from rest_framework.response import Response
 from rest_framework import status
 from .serializers import BankAccountSerializer
 
+def _verify_identity_photo(photo, aadhar_number, account_holder_name):
+    """OCR-checks that the uploaded ID photo's text contains the submitted
+    Aadhar number and name. Returns a list of error strings (empty = passed)."""
+    import re
+    try:
+        image = Image.open(photo)
+        extracted_text = pytesseract.image_to_string(image)
+    except Exception as e:
+        logger.error(f"Error processing identity photo: {e}")
+        return ["Could not process the uploaded photo. Please upload a clear image."]
+
+    extracted_normalized = extracted_text.lower()
+    extracted_digits = re.sub(r'\D', '', extracted_text)
+    errors = []
+    if aadhar_number:
+        aadhar_digits = re.sub(r'\D', '', str(aadhar_number))
+        if not aadhar_digits or aadhar_digits not in extracted_digits:
+            errors.append("Aadhar number does not match the one in the photo.")
+    if account_holder_name:
+        name_normalized = ' '.join(account_holder_name.lower().split())
+        if name_normalized not in ' '.join(extracted_normalized.split()):
+            errors.append("Account holder name does not match the one in the photo.")
+    return errors
+
+
 class CreateBankAccountView(APIView):
     authentication_classes = []
     permission_classes = [AllowAny]
 
     def post(self, request, *args, **kwargs):
+        ip = request.META.get('REMOTE_ADDR', 'unknown')
+        if not _rate_limit(f'create_account_{ip}', max_attempts=3, window_seconds=3600):
+            return Response({'error': 'Too many account creation attempts. Try again later.'}, status=status.HTTP_429_TOO_MANY_REQUESTS)
         serializer = BankAccountSerializer(data=request.data)
-        if serializer.is_valid():
-            account = serializer.save()
-            return Response({
-                'message': 'Bank account created successfully.',
-                'account_number': account.account_number,
-            }, status=status.HTTP_201_CREATED)
-        logger.error('CreateBankAccount validation errors: %s', serializer.errors)
-        return Response({'error': serializer.errors}, status=status.HTTP_400_BAD_REQUEST)
+        if not serializer.is_valid():
+            logger.error('CreateBankAccount validation errors: %s', serializer.errors)
+            return Response({'error': serializer.errors}, status=status.HTTP_400_BAD_REQUEST)
+
+        photo = serializer.validated_data.get('photo')
+        if not photo:
+            return Response({'error': 'Photo is required for identity verification.'}, status=status.HTTP_400_BAD_REQUEST)
+        errors = _verify_identity_photo(
+            photo,
+            serializer.validated_data.get('aadhar_number'),
+            serializer.validated_data.get('account_holder_name'),
+        )
+        if errors:
+            return Response({'error': errors}, status=status.HTTP_400_BAD_REQUEST)
+
+        account = serializer.save()
+        return Response({
+            'message': 'Bank account created successfully.',
+            'account_number': account.account_number,
+        }, status=status.HTTP_201_CREATED)
 
 
 @csrf_exempt
@@ -509,9 +549,25 @@ def profile_view(request):
         'passport_number': f'XXXXX{bank_account.passport_number[-4:]}' if bank_account.passport_number else None,
         'voter_id_number': f'XXXXXXX{bank_account.voter_id_number[-3:]}' if bank_account.voter_id_number else None,
         'pan_card_number': bank_account.pan_card_number,
-        'photo': bank_account.photo.url if bank_account.photo else None,
+        'photo': '/accounts/identity-photo/' if bank_account.photo else None,
         'created_at': str(bank_account.created_at) if bank_account.created_at else None,
     })
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def identity_photo_view(request):
+    """Serves the caller's own identity photo. Never exposed via a public
+    media URL — access requires a valid JWT for the account that owns the photo."""
+    try:
+        bank_account = BankAccount.objects.get(user=request.user)
+    except BankAccount.DoesNotExist:
+        return Response({'error': 'No bank account linked to this user.'}, status=status.HTTP_404_NOT_FOUND)
+    if not bank_account.photo:
+        return Response({'error': 'No photo on file.'}, status=status.HTTP_404_NOT_FOUND)
+    return FileResponse(bank_account.photo.open('rb'), content_type='image/jpeg')
+
+
 @csrf_exempt
 @api_view(['PUT'])
 @permission_classes([IsAuthenticated])
@@ -561,44 +617,17 @@ def edit_profile_view(request):
         'passport_number': bank_account.passport_number,
         'voter_id_number': bank_account.voter_id_number,
         'pan_card_number': bank_account.pan_card_number,
-        'photo': bank_account.photo.url if bank_account.photo else None,
+        'photo': '/accounts/identity-photo/' if bank_account.photo else None,
         'created_at': bank_account.created_at
     }})
-@method_decorator(csrf_exempt, name='dispatch')
-class CreateBankAccount(APIView):
-    def post(self, request):
-        serializer = BankAccountSerializer(data=request.data)
-        if serializer.is_valid():
-            validated_data = serializer.validated_data
-            photo = validated_data.get('photo')
-            aadhar_number = validated_data.get('aadhar_number')
-            account_holder_name = validated_data.get('account_holder_name')
-            if photo:
-                try:
-                    image = Image.open(photo)
-                    extracted_text = pytesseract.image_to_string(image)
-                    errors = []
-                    if aadhar_number and aadhar_number not in extracted_text:
-                        errors.append("Aadhar number does not match the one in the photo.")
-                    if account_holder_name and account_holder_name not in extracted_text:
-                        errors.append("Account holder name does not match the one in the photo.")
-                    if errors:
-                        return Response({"error": errors}, status=status.HTTP_400_BAD_REQUEST)
-                    else:
-                        serializer.save()
-                        return Response(serializer.data, status=status.HTTP_201_CREATED)
-                except Exception as e:
-                    logger.error(f"Error processing image: {e}")
-                    return Response({"error": "Error processing image."}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-            else:
-                return Response({"error": "Photo is required for verification"}, status=status.HTTP_400_BAD_REQUEST)
-        else:
-            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 class CreateBankAccountForMinor(APIView):
     authentication_classes = []
     permission_classes = [AllowAny]
 
     def post(self, request):
+        ip = request.META.get('REMOTE_ADDR', 'unknown')
+        if not _rate_limit(f'create_account_{ip}', max_attempts=3, window_seconds=3600):
+            return Response({'error': 'Too many account creation attempts. Try again later.'}, status=status.HTTP_429_TOO_MANY_REQUESTS)
         serializer = BankAccountminorSerializer(data=request.data)
         if serializer.is_valid():
             account = serializer.save()
@@ -614,6 +643,9 @@ class CreateBankAccountForSenior(APIView):
     permission_classes = [AllowAny]
 
     def post(self, request):
+        ip = request.META.get('REMOTE_ADDR', 'unknown')
+        if not _rate_limit(f'create_account_{ip}', max_attempts=3, window_seconds=3600):
+            return Response({'error': 'Too many account creation attempts. Try again later.'}, status=status.HTTP_429_TOO_MANY_REQUESTS)
         serializer = BankAccountseniorSerializer(data=request.data)
         if serializer.is_valid():
             account = serializer.save()
@@ -825,17 +857,20 @@ def admin_list_transactions(request):
 
 
 # ── CVV encryption helpers ───────────────────────────────────────────────────
+# Uses Fernet symmetric encryption (account/encryption_key.key) instead of
+# Django's signing.dumps, which is HMAC-signed but NOT confidential — the
+# CVV was trivially recoverable from the stored value without the SECRET_KEY.
 def _encrypt_cvv(cvv_plain):
-    from django.core import signing
-    return signing.dumps(cvv_plain, salt='card-cvv')
+    from .serializers import encrypt_data
+    return encrypt_data(cvv_plain).decode()
 
 
 def _decrypt_cvv(encrypted_cvv):
-    from django.core import signing
+    from .serializers import decrypt_data
     try:
-        return signing.loads(encrypted_cvv, salt='card-cvv')
+        return decrypt_data(encrypted_cvv.encode())
     except Exception:
-        return encrypted_cvv if len(encrypted_cvv) <= 3 else None
+        return None
 
 
 # ── Card number generator (Luhn-valid 16-digit number) ───────────────────────
@@ -843,7 +878,7 @@ def _generate_card_number(card_type):
     prefixes = {'classic': '4111', 'gold': '5200', 'platinum': '3782'}
     prefix = prefixes.get(card_type, '4111')
     while True:
-        partial = prefix + ''.join([str(random.randint(0, 9)) for _ in range(11)])
+        partial = prefix + ''.join([str(secrets.randbelow(10)) for _ in range(11)])
         total = sum(
             (n * 2 - 9 if n * 2 > 9 else n * 2) if i % 2 == 0 else n
             for i, n in enumerate(int(d) for d in reversed(partial))
@@ -949,7 +984,7 @@ def admin_review_card_request(request, pk):
         from datetime import date
         req.card_number = _generate_card_number(req.card_type)
         req.expiry_date = date(timezone.now().year + 4, timezone.now().month, 1)
-        req.cvv = _encrypt_cvv(str(random.randint(100, 999)))
+        req.cvv = _encrypt_cvv(str(secrets.randbelow(900) + 100))
 
     req.save()
 

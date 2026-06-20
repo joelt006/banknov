@@ -1,7 +1,7 @@
 from django.urls import path
 from .views import (
     CreateBankAccountView, CreateBankAccountForMinor, CreateBankAccountForSenior,
-    register, verify_otp, profile_view, edit_profile_view, login_view,
+    register, verify_otp, profile_view, edit_profile_view, identity_photo_view, login_view,
     user_info, balance_view, get_csrf_token,
     get_captcha, login_otp_verify, logout_view,
     forgot_password, reset_password, change_password,
@@ -49,6 +49,7 @@ urlpatterns = [
     # Profile
     path('profile/', profile_view, name='profile'),
     path('edit-profile/', edit_profile_view, name='edit_profile'),
+    path('identity-photo/', identity_photo_view, name='identity_photo'),
     path('user/', user_info, name='user_info'),
     path('balance/', balance_view, name='balance_view'),
     path('get-csrf-token/', get_csrf_token, name='get_csrf_token'),

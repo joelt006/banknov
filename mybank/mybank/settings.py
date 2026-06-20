@@ -25,6 +25,13 @@ except ImportError:
 STATIC_URL = '/static/'
 STATIC_ROOT = os.path.join(BASE_DIR, 'static')
 
+# Identity photos are stored here but are NEVER served via a public, unauthenticated
+# route. MEDIA_URL exists only so Django's ImageField.url doesn't error — no
+# urls.py pattern serves it. Access goes through account.views.identity_photo_view,
+# which gates access behind authentication and ownership checks.
+MEDIA_URL = '/media/'
+MEDIA_ROOT = BASE_DIR
+
 # Quick-start development settings - unsuitable for production
 # See https://docs.djangoproject.com/en/5.0/howto/deployment/checklist/
 
@@ -187,11 +194,26 @@ CSRF_COOKIE_SAMESITE = 'None'  # Allow cross-site cookies for same-site requests
 SESSION_COOKIE_SAMESITE = 'None'
 CSRF_HEADER_NAME = "HTTP_X_CSRFTOKEN"  # Default header name for CSRF token in the request
 
-CACHES = {
-    'default': {
-        'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',
+# LocMemCache is per-process — under multiple Gunicorn/uWSGI workers, OTP
+# storage and rate limits would only apply per-worker, not globally. Set
+# REDIS_URL in production so cache state is shared across all workers.
+REDIS_URL = os.environ.get('REDIS_URL')
+if REDIS_URL:
+    CACHES = {
+        'default': {
+            'BACKEND': 'django_redis.cache.RedisCache',
+            'LOCATION': REDIS_URL,
+            'OPTIONS': {
+                'CLIENT_CLASS': 'django_redis.client.DefaultClient',
+            },
+        }
     }
-}
+else:
+    CACHES = {
+        'default': {
+            'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',
+        }
+    }
 
 
 LANGUAGE_CODE = 'en-us'
